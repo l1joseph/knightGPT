@@ -49,13 +49,33 @@ class KnowledgeGraphBuilder:
         Returns:
             NetworkX graph
         """
+        # Input validation
+        if not chunks:
+            logger.warning("Empty chunks list provided")
+            return self.graph
+        
+        if not isinstance(chunks, list):
+            raise TypeError("chunks must be a list")
+        
         logger.info(f"Building graph from {len(chunks)} chunks")
         
-        # Filter chunks with embeddings
-        chunks_with_emb = [c for c in chunks if c.embedding is not None]
+        # Filter chunks with embeddings and validate
+        chunks_with_emb = []
+        for c in chunks:
+            if c is None:
+                continue
+            if not hasattr(c, 'embedding') or c.embedding is None:
+                continue
+            if not isinstance(c.embedding, (list, tuple)) or len(c.embedding) == 0:
+                logger.warning(f"Chunk {c.id} has invalid embedding")
+                continue
+            if not hasattr(c, 'id') or not c.id:
+                logger.warning("Chunk missing ID, skipping")
+                continue
+            chunks_with_emb.append(c)
         
         if not chunks_with_emb:
-            logger.warning("No chunks with embeddings found")
+            logger.warning("No chunks with valid embeddings found")
             return self.graph
         
         # Add nodes
@@ -70,21 +90,45 @@ class KnowledgeGraphBuilder:
             )
         
         # Compute similarity matrix
-        embeddings = np.array([c.embedding for c in chunks_with_emb])
-        n = len(chunks_with_emb)
-        
-        logger.info("Computing similarity matrix...")
-        
-        # Add edges based on similarity
-        edge_count = 0
-        for i in range(n):
-            similarities = []
+        try:
+            # Validate embedding dimensions
+            emb_dims = [len(c.embedding) for c in chunks_with_emb]
+            if len(set(emb_dims)) > 1:
+                logger.warning(f"Inconsistent embedding dimensions: {set(emb_dims)}")
+                # Use most common dimension
+                from collections import Counter
+                common_dim = Counter(emb_dims).most_common(1)[0][0]
+                chunks_with_emb = [c for c in chunks_with_emb if len(c.embedding) == common_dim]
+                logger.info(f"Filtered to {len(chunks_with_emb)} chunks with dimension {common_dim}")
             
-            for j in range(n):
-                if i != j:
-                    sim = 1 - cosine(embeddings[i], embeddings[j])
-                    if sim >= self.similarity_threshold:
-                        similarities.append((j, sim))
+            if not chunks_with_emb:
+                return self.graph
+            
+            embeddings = np.array([c.embedding for c in chunks_with_emb])
+            n = len(chunks_with_emb)
+            
+            logger.info("Computing similarity matrix...")
+            
+            # Add edges based on similarity
+            edge_count = 0
+            for i in range(n):
+                similarities = []
+                
+                for j in range(n):
+                    if i != j:
+                        try:
+                            sim = 1 - cosine(embeddings[i], embeddings[j])
+                            if not np.isfinite(sim):
+                                logger.warning(f"Invalid similarity value between chunks {i} and {j}")
+                                continue
+                            if sim >= self.similarity_threshold:
+                                similarities.append((j, sim))
+                        except Exception as e:
+                            logger.warning(f"Error computing similarity: {e}")
+                            continue
+        except Exception as e:
+            logger.error(f"Error building graph: {e}")
+            return self.graph
             
             # Keep only top neighbors
             similarities.sort(key=lambda x: x[1], reverse=True)

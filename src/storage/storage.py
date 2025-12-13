@@ -55,14 +55,30 @@ class Neo4jStorage:
     def _create_indexes(self):
         """Create necessary indexes."""
         with self.driver.session(database=self.database) as session:
-            # Index on chunk ID
-            session.run(
-                "CREATE INDEX chunk_id IF NOT EXISTS FOR (c:Chunk) ON (c.id)"
-            )
+            # Index on chunk ID (handle different Neo4j versions)
+            try:
+                # Neo4j 5.x syntax
+                session.run(
+                    "CREATE INDEX chunk_id IF NOT EXISTS FOR (c:Chunk) ON (c.id)"
+                )
+            except Exception:
+                try:
+                    # Fallback for older versions
+                    session.run("CREATE INDEX ON :Chunk(id)")
+                except Exception:
+                    logger.warning("Could not create chunk_id index")
+            
             # Index on source file
-            session.run(
-                "CREATE INDEX chunk_source IF NOT EXISTS FOR (c:Chunk) ON (c.source_file)"
-            )
+            try:
+                session.run(
+                    "CREATE INDEX chunk_source IF NOT EXISTS FOR (c:Chunk) ON (c.source_file)"
+                )
+            except Exception:
+                try:
+                    session.run("CREATE INDEX ON :Chunk(source_file)")
+                except Exception:
+                    logger.warning("Could not create chunk_source index")
+            
             # Full-text index for search
             try:
                 session.run("""
@@ -70,7 +86,17 @@ class Neo4jStorage:
                     FOR (c:Chunk) ON EACH [c.text]
                 """)
             except Exception:
-                pass  # May already exist
+                # Try alternative syntax for older versions
+                try:
+                    session.run("""
+                        CALL db.index.fulltext.createNodeIndex(
+                            "chunk_text",
+                            ["Chunk"],
+                            ["text"]
+                        )
+                    """)
+                except Exception:
+                    logger.warning("Could not create fulltext index")
 
     def close(self):
         """Close Neo4j connection."""

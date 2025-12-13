@@ -113,10 +113,27 @@ class GraphRAGRetriever:
         Returns:
             RetrievalResult with chunks and scores
         """
+        # Input validation
+        if not query or not isinstance(query, str) or not query.strip():
+            logger.warning("Empty or invalid query provided")
+            return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
+        
+        if not self.chunks:
+            logger.warning("No chunks available for retrieval")
+            return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
+        
         top_k = top_k or self.top_k
+        top_k = max(1, min(top_k, len(self.chunks)))  # Clamp to valid range
         
         # Generate query embedding
-        query_embedding = self.embedder.embed_text(query)
+        try:
+            query_embedding = self.embedder.embed_text(query)
+            if not query_embedding or len(query_embedding) == 0:
+                logger.error("Failed to generate query embedding")
+                return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
         
         # Find similar chunks
         results = self.graph_builder.find_similar_chunks(
@@ -139,11 +156,11 @@ class GraphRAGRetriever:
             # Re-score expanded chunks
             expanded_scores = []
             for chunk in expanded_chunks:
-                if chunk in initial_chunks:
+                try:
                     idx = initial_chunks.index(chunk)
                     expanded_scores.append(similarity_scores[idx])
-                else:
-                    # Calculate similarity for new chunks
+                except ValueError:
+                    # Chunk not in initial_chunks, calculate similarity
                     from scipy.spatial.distance import cosine
                     import numpy as np
                     
@@ -215,14 +232,25 @@ class GraphRAGRetriever:
         """Create citation objects from chunks."""
         citations = []
         
+        # Ensure matching lengths
+        min_len = min(len(chunks), len(scores))
+        chunks = chunks[:min_len]
+        scores = scores[:min_len]
+        
         for chunk, score in zip(chunks, scores):
-            citations.append(Citation(
-                chunk_id=chunk.id,
-                source_file=chunk.source_file,
-                section=chunk.section,
-                text_snippet=chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text,
-                similarity=score,
-            ))
+            if not chunk:
+                continue
+            try:
+                citations.append(Citation(
+                    chunk_id=chunk.id or "unknown",
+                    source_file=chunk.source_file or "unknown",
+                    section=chunk.section,
+                    text_snippet=chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text if chunk.text else "",
+                    similarity=float(score) if score is not None else 0.0,
+                ))
+            except Exception as e:
+                logger.warning(f"Failed to create citation: {e}")
+                continue
         
         return citations
 

@@ -108,7 +108,25 @@ class SemanticChunker:
         Returns:
             List of Chunk objects
         """
+        # Input validation
+        if text is None:
+            logger.warning("None text provided, returning empty chunks")
+            return []
+        
+        if not isinstance(text, str):
+            raise TypeError(f"text must be a string, got {type(text)}")
+        
+        if not text.strip():
+            logger.info("Empty text provided, returning empty chunks")
+            return []
+        
+        if not source_file:
+            raise ValueError("source_file cannot be empty")
+        
         metadata = metadata or {}
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be a dictionary")
+        
         chunks = []
         
         # Split into paragraphs
@@ -264,10 +282,10 @@ class SemanticChunker:
         metadata: dict,
     ) -> Chunk:
         """Create a Chunk object."""
-        # Generate unique ID
-        chunk_id = hashlib.md5(
-            f"{source_file}:{section}:{text[:100]}".encode()
-        ).hexdigest()[:16]
+        # Generate unique ID using full MD5 hash to avoid collisions
+        # Include more context for uniqueness
+        id_string = f"{source_file}:{section}:{text[:200]}:{len(text)}"
+        chunk_id = hashlib.md5(id_string.encode()).hexdigest()
         
         return Chunk(
             id=chunk_id,

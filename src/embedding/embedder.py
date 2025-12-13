@@ -94,11 +94,24 @@ class VLLMEmbedder:
         Returns:
             Embedding vector
         """
-        response = self.client.embeddings.create(
-            model=self.model,
-            input=text,
-        )
-        return response.data[0].embedding
+        # Input validation
+        if not text or not isinstance(text, str):
+            raise ValueError("text must be a non-empty string")
+        
+        if not text.strip():
+            raise ValueError("text cannot be empty or whitespace only")
+        
+        try:
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=text,
+            )
+            if not response.data or len(response.data) == 0:
+                raise ValueError("Empty response from embedding API")
+            return response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            raise
 
     @retry(
         stop=stop_after_attempt(3),
@@ -117,13 +130,35 @@ class VLLMEmbedder:
         if not texts:
             return []
         
-        response = self.client.embeddings.create(
-            model=self.model,
-            input=texts,
-        )
+        # Input validation
+        if not isinstance(texts, list):
+            raise TypeError("texts must be a list")
         
-        # Sort by index to maintain order
-        sorted_data = sorted(response.data, key=lambda x: x.index)
+        # Filter out invalid entries
+        valid_texts = [t for t in texts if t and isinstance(t, str) and t.strip()]
+        if len(valid_texts) != len(texts):
+            logger.warning(f"Filtered out {len(texts) - len(valid_texts)} invalid texts")
+        
+        if not valid_texts:
+            return []
+        
+        try:
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=valid_texts,
+            )
+        except Exception as e:
+            logger.error(f"Batch embedding failed: {e}")
+            raise
+        
+        # Sort by index to maintain order (if index is available)
+        # Some APIs may not return index, so handle gracefully
+        try:
+            sorted_data = sorted(response.data, key=lambda x: getattr(x, 'index', 0))
+        except (AttributeError, TypeError):
+            # If sorting fails, return in original order
+            sorted_data = response.data
+        
         return [item.embedding for item in sorted_data]
 
     def embed_chunks(

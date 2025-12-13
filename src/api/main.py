@@ -182,7 +182,11 @@ async def health_check():
         logger.error(f"Inference health check failed: {e}")
     
     chunks_count = len(_retriever.chunks) if _retriever else 0
-    graph_nodes = _retriever.graph_builder.graph.number_of_nodes() if _retriever else 0
+    graph_nodes = (
+        _retriever.graph_builder.graph.number_of_nodes()
+        if _retriever and _retriever.graph_builder and _retriever.graph_builder.graph
+        else 0
+    )
     
     status = "healthy" if embedding_healthy and inference_healthy else "degraded"
     
@@ -263,6 +267,11 @@ async def semantic_search(
         expand_context=request.expand_context,
     )
     
+    # Ensure chunks and scores have matching lengths
+    min_len = min(len(result.chunks), len(result.similarity_scores))
+    chunks = result.chunks[:min_len]
+    scores = result.similarity_scores[:min_len]
+    
     return [
         SearchResult(
             chunk_id=chunk.id,
@@ -271,7 +280,7 @@ async def semantic_search(
             section=chunk.section,
             similarity=score,
         )
-        for chunk, score in zip(result.chunks, result.similarity_scores)
+        for chunk, score in zip(chunks, scores)
     ]
 
 
@@ -305,10 +314,54 @@ async def ingest_documents(
                 )
                 logger.info(f"Ingested {len(results)} files")
             
-            # TODO: Re-chunk, embed, and rebuild graph
+            # Re-chunk, embed, and rebuild graph
+            from ..chunking import SemanticChunker, save_chunks, load_chunks
+            from ..embedding import VLLMEmbedder
+            from ..graph import build_graph_from_chunks
+            
+            # Load existing chunks
+            chunks_file = settings.ingestion.processed_dir / "chunks_with_emb.json"
+            existing_chunks = []
+            if chunks_file.exists():
+                existing_chunks = load_chunks(chunks_file)
+            
+            # Chunk new markdown files
+            chunker = SemanticChunker()
+            new_chunks = chunker.chunk_directory(
+                settings.ingestion.markdown_dir,
+                settings.ingestion.processed_dir / "chunks_new.json"
+            )
+            
+            # Generate embeddings for new chunks
+            embedder = VLLMEmbedder()
+            if embedder.check_health():
+                new_chunks = embedder.embed_chunks(new_chunks)
+            
+            # Merge with existing chunks
+            all_chunks = existing_chunks + new_chunks
+            
+            # Save updated chunks
+            save_chunks(all_chunks, chunks_file)
+            
+            # Rebuild graph
+            graph_file = settings.graph.graph_path
+            build_graph_from_chunks(
+                chunks_path=chunks_file,
+                output_path=graph_file,
+                threshold=settings.graph.similarity_threshold,
+            )
+            
+            # Reload retriever and engine
+            global _retriever, _rag_engine
+            _retriever = GraphRAGRetriever(
+                chunks_path=chunks_file,
+                graph_path=graph_file if graph_file.exists() else None,
+            )
+            _rag_engine = RAGEngine(retriever=_retriever)
+            logger.info("Knowledge base updated and reloaded")
             
         except Exception as e:
-            logger.error(f"Ingestion failed: {e}")
+            logger.error(f"Ingestion failed: {e}", exc_info=True)
     
     background_tasks.add_task(process_ingestion)
     

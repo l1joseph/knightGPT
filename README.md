@@ -50,11 +50,6 @@ A Retrieval-Augmented Generation (RAG) system specialized in microbiome research
 
 ```
 knightGPT/
-├── configs/
-│   ├── vllm_embedding.yaml      # vLLM embedding server config
-│   ├── vllm_inference.yaml      # vLLM inference server config
-│   └── open_webui.yaml          # Open WebUI configuration
-│
 ├── data/
 │   ├── raw_pdfs/                # Source PDF files
 │   ├── markdown/                # Converted markdown files
@@ -62,18 +57,17 @@ knightGPT/
 │
 ├── docs/
 │   ├── DEPLOYMENT.md            # Deployment guide for Cosmos cluster
-│   ├── API.md                   # API documentation
-│   └── ARCHITECTURE.md          # System architecture details
+│   └── USAGE.md                 # Post-deployment and daily usage guide
 │
 ├── scripts/
-│   ├── setup_vllm_rocm.sh       # Setup vLLM for AMD MI300A
 │   ├── ingest_pipeline.py       # Full ingestion pipeline runner
-│   └── healthcheck.py           # Service health monitoring
+│   ├── bug_detection.py         # Comprehensive bug detection script
+│   ├── healthcheck.py           # Service health monitoring
+│   └── monitor.py               # Continuous monitoring daemon
 │
 ├── slurm/
 │   ├── vllm_embedding.slurm     # SLURM job for embedding server
-│   ├── vllm_inference.slurm     # SLURM job for inference server
-│   └── batch_ingest.slurm       # SLURM job for batch processing
+│   └── vllm_inference.slurm     # SLURM job for inference server
 │
 ├── src/
 │   ├── ingestion/
@@ -105,9 +99,7 @@ knightGPT/
 │   │
 │   ├── api/
 │   │   ├── __init__.py
-│   │   ├── main.py              # FastAPI application
-│   │   ├── routes.py            # API endpoints
-│   │   └── models.py            # Pydantic models
+│   │   └── main.py              # FastAPI application (all endpoints)
 │   │
 │   ├── utils/
 │   │   ├── __init__.py
@@ -116,13 +108,22 @@ knightGPT/
 │   │
 │   └── cli.py                   # CLI interface
 │
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py              # Pytest fixtures
+│   ├── test_chunking.py         # Chunking module tests
+│   ├── test_embedding.py        # Embedding module tests
+│   ├── test_graph.py            # Graph module tests
+│   ├── test_retrieval.py        # Retrieval module tests
+│   ├── test_integration.py      # Integration tests
+│   └── test_api.py              # API endpoint tests
+│
 ├── docker/
 │   ├── Dockerfile.api           # API server container
-│   ├── Dockerfile.ingest        # Ingestion worker container
 │   └── docker-compose.yaml      # Full stack deployment
 │
 ├── requirements.txt             # Python dependencies
-├── pyproject.toml               # Project configuration
+├── pytest.ini                   # Pytest configuration
 └── README.md                    # This file
 ```
 
@@ -130,10 +131,11 @@ knightGPT/
 
 ### Prerequisites
 
-- Access to SDSC Cosmos cluster with MI300A APUs
+- Access to SDSC Cosmos cluster with MI300A APUs (for production)
 - Python 3.10+
-- ROCm 6.2+ (pre-installed on Cosmos)
+- ROCm 6.2+ (pre-installed on Cosmos, or local setup for development)
 - Neo4j (optional, for persistent graph storage)
+- vLLM servers running (embedding and inference)
 
 ### 1. Setup Environment on Cosmos
 
@@ -172,21 +174,60 @@ python scripts/ingest_pipeline.py \
     --output data/processed/ \
     --embedding-url http://localhost:8001/v1 \
     --threshold 0.7
+
+# Or start from PDFs
+python scripts/ingest_pipeline.py \
+    --input data/raw_pdfs/ \
+    --output data/processed/ \
+    --embedding-url http://localhost:8001/v1
 ```
 
 ### 4. Run Inference API
 
 ```bash
 # Start FastAPI server
-python -m src.api.main --host 0.0.0.0 --port 8000
+python -m src.api.main --host 0.0.0.0 --port 8080
 ```
 
-### 5. Deploy Web Interface
+### 5. Verify Installation
+
+```bash
+# Run health check
+python scripts/healthcheck.py
+
+# Run bug detection
+python scripts/bug_detection.py
+
+# Run tests
+pytest tests/
+```
+
+### 6. Use CLI Interface (Alternative to API)
+
+```bash
+# Interactive chat interface
+python -m src.cli \
+    --chunks data/processed/chunks_with_emb.json \
+    --graph data/processed/graph.graphml \
+    --top-k 5
+```
+
+### 7. Deploy Web Interface
 
 ```bash
 # Using docker-compose
 cd docker && docker-compose up -d
 ```
+
+## Key Features
+
+- **Knowledge Graph RAG**: Graph-based retrieval for improved context understanding
+- **Multiple Ingestion Methods**: PDF upload, Google Forms webhook, web scraping
+- **Comprehensive Testing**: Unit, integration, and API tests with bug detection
+- **Health Monitoring**: Real-time health checks and continuous monitoring
+- **OpenAI-Compatible API**: Works with Open WebUI and other OpenAI-compatible clients
+- **CLI Interface**: Terminal-based chat interface for quick queries
+- **Production-Ready**: Error handling, input validation, and robust error recovery
 
 ## Model Selection
 
@@ -245,10 +286,15 @@ The web interface is hosted at `https://knight-lab-dev.org` using:
 
 | Endpoint         | Method | Description                  |
 | ---------------- | ------ | ---------------------------- |
+| `/health`        | GET    | Service health status        |
 | `/api/v1/chat`   | POST   | RAG-enhanced chat completion |
 | `/api/v1/ingest` | POST   | Ingest new documents         |
 | `/api/v1/search` | POST   | Semantic search              |
-| `/api/v1/health` | GET    | Service health status        |
+| `/api/v1/webhook/google-form` | POST | Google Form webhook |
+| `/v1/models`     | GET    | List models (OpenAI-compatible) |
+| `/v1/chat/completions` | POST | OpenAI-compatible chat |
+
+See [docs/USAGE.md](docs/USAGE.md) for detailed API usage examples.
 
 ## SDSC Cosmos Cluster Notes
 
@@ -267,11 +313,47 @@ The web interface is hosted at `https://knight-lab-dev.org` using:
 #SBATCH --mem=256G
 ```
 
+## Testing
+
+Run the comprehensive test suite:
+
+```bash
+# Run all tests
+pytest tests/
+
+# Run specific test module
+pytest tests/test_chunking.py
+
+# Run with coverage
+pytest tests/ --cov=src --cov-report=html
+```
+
+## Monitoring
+
+Monitor system health:
+
+```bash
+# One-time health check
+python scripts/healthcheck.py
+
+# Continuous monitoring
+python scripts/monitor.py --interval 60
+
+# Save health report
+python scripts/healthcheck.py --output health_report.json
+```
+
+## Documentation
+
+- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Complete deployment guide for SDSC Cosmos cluster
+- **[USAGE.md](docs/USAGE.md)** - Post-deployment operations and day-to-day usage guide
+
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Submit a pull request
+3. Run tests and bug detection: `pytest tests/ && python scripts/bug_detection.py`
+4. Submit a pull request
 
 ## License
 
