@@ -6,7 +6,6 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 class Embedder:
     """
