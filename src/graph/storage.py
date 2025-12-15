@@ -5,7 +5,6 @@ import networkx as nx
 from py2neo import Graph, Node, Relationship
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 class GraphStorage:
     """
