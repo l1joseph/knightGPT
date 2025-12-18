@@ -1,0 +1,79 @@
+name: knightGPT
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # Core scientific stack (conda = stable)
+  - numpy>=1.26
+  - scipy>=1.12
+  - scikit-learn>=1.4
+  - networkx>=3.2
+  - nltk>=3.8
+  - lxml>=5.1
+  - openpyxl>=3.1
+  - beautifulsoup4>=4.12
+
+  # Runtime / build stability on HPC
+  - libstdcxx-ng
+  - gcc_impl_linux-64
+
+  # Everything else via pip
+  - pip:
+      # API / server
+      - fastapi>=0.109.0
+      - uvicorn[standard]>=0.27.0
+      - httpx>=0.26.0
+      - aiohttp>=3.9.0
+      - tenacity>=8.2.3
+      - python-dotenv>=1.0.0
+
+      # OpenAI-compatible clients
+      - openai>=1.12.0
+
+      # PDF processing
+      - marker-pdf>=1.0.0
+      - pymupdf4llm>=0.0.5
+      - pymupdf>=1.24.0
+      - pdfminer.six>=20231228
+
+      # NLP / embeddings
+      - tiktoken>=0.5.2
+      - spacy>=3.7.2
+      - sentence-transformers>=2.3.0
+
+      # Graph / persistence
+      - pyvis>=0.3.2
+      - neo4j>=5.16.0
+
+      # Scraping / requests
+      - scrapy>=2.11.0
+      - requests>=2.31.0
+
+      # Google APIs
+      - google-api-python-client>=2.116.0
+      - google-auth-httplib2>=0.2.0
+      - google-auth-oauthlib>=1.2.0
+
+      # Logging
+      - loguru>=0.7.2
+      - rich>=13.7.0
+      - prometheus-client>=0.19.0
+
+      # CLI
+      - typer>=0.9.0
+      - click>=8.1.7
+
+      # Testing
+      - pytest>=8.0.0
+      - pytest-asyncio>=0.23.0
+      - pytest-cov>=4.1.0
+
+      # Dev
+      - black>=24.1.0
+      - isort>=5.13.0
+      - mypy>=1.8.0
+      - ruff>=0.1.14
