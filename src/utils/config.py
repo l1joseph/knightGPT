@@ -237,6 +237,25 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @property
+    def slurm_node(self) -> Optional[str]:
+        """Get current SLURM node hostname from environment."""
+        import os
+        return os.environ.get("SLURM_NODELIST") or os.environ.get("SLURMD_NODENAME")
+
+    def get_vllm_url(self, service: str = "embedding") -> str:
+        """
+        Get vLLM URL, auto-detecting SLURM node if running in a job.
+
+        If SLURM_NODELIST is set and the URL is localhost, replace
+        with the actual compute node hostname.
+        """
+        url = self.vllm.embedding_url if service == "embedding" else self.vllm.inference_url
+        node = self.slurm_node
+        if node and "localhost" in url:
+            url = url.replace("localhost", node)
+        return url
+
 
 # Global settings instance
 _settings: Optional[Settings] = None
