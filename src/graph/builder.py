@@ -296,7 +296,44 @@ class KnowledgeGraphBuilder:
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        
+
+        # Sanitize all attributes for GraphML compatibility
+        # GraphML doesn't support None, dict, list, or XML-invalid characters
+        import json as _json
+        import re as _re
+        # Match all XML 1.0 illegal characters including surrogates
+        _ctrl_re = _re.compile(
+            r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f'
+            r'\ud800-\udfff\ufdd0-\ufdef\ufffe\uffff]'
+        )
+
+        def _sanitize(val):
+            if val is None:
+                return ""
+            if isinstance(val, (dict, list)):
+                return _json.dumps(val)
+            if isinstance(val, str):
+                return _ctrl_re.sub('', val)
+            return val
+
+        # Sanitize node IDs and attributes
+        relabel = {}
+        for node_id in list(self.graph.nodes):
+            if isinstance(node_id, str):
+                clean_id = _ctrl_re.sub('', node_id)
+                if clean_id != node_id:
+                    relabel[node_id] = clean_id
+            attrs = self.graph.nodes[node_id]
+            for key in list(attrs.keys()):
+                attrs[key] = _sanitize(attrs[key])
+        if relabel:
+            self.graph = nx.relabel_nodes(self.graph, relabel)
+
+        # Sanitize edge attributes
+        for u, v, attrs in self.graph.edges(data=True):
+            for key in list(attrs.keys()):
+                attrs[key] = _sanitize(attrs[key])
+
         nx.write_graphml(self.graph, str(path))
         logger.info(f"Graph saved to {path}")
 

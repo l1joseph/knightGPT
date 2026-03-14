@@ -1,0 +1,584 @@
+# KnightGPT Paper List — from mmc_datasheet.tsv (microbiome studies)
+# 194 papers extracted from supplementary dataset
+
+# Interplay of Metabolome and Gut Microbiome in Individuals With Major Depressive Disorder vs Control Individuals
+10.1001/jamapsychiatry.2023.0685
+
+# Composition and stability of the vervet monkey milk microbiome
+10.1002/ajp.22982
+
+# Household composition and the infant fecal microbiome: The INSPIRE study
+10.1002/ajpa.23843
+
+# The microbiome of pediatric patients with chronic rhinosinusitis
+10.1002/alr.22597
+
+# Impact of acid blocker therapy on growth, gut microbiome, and lung disease in young children with cystic fibrosis
+10.1002/jpn3.12389
+
+# Jamun (Eugenia jambolana Lam.) Fruit Extract Prevents Obesity by Modulating the Gut Microbiome in High-Fat-Diet-Fed Mice
+10.1002/mnfr.201801307
+
+# The Effect of Broccoli Glucoraphanin Supplementation on Ameliorating High-Fat-Diet-Induced Obesity through the Gut Microbiome and Metabolome Interface
+10.1002/mnfr.202300856
+
+# Alterations in vaginal microbiome in women with short cervix: longitudinal study of microbial diversity and impact of vaginal progesterone treatment
+10.1002/uog.29269
+
+# The Urinary, Vaginal, and Perineal Microbiome: Commonalities and Differences
+10.1007/s00192-025-06144-8
+
+# The role of oral microbiome in pemphigus vulgaris
+10.1007/s00203-021-02199-5
+
+# Microbial Communities of Stored Product Mites: Variation by Species and Population
+10.1007/s00248-020-01581-y
+
+# Spatial Characteristics of Colonic Mucosa-Associated Gut Microbiota in Humans
+10.1007/s00248-021-01789-6
+
+# The Diversity of Vaginal Microbiota Predicts Neoadjuvant Chemotherapy Responsiveness in Locally Advanced Cervical Cancer
+10.1007/s00248-021-01800-0
+
+# Comparison of iSeq and MiSeq as the two platforms for 16S rRNA sequencing in the study of the gut of rat microbiome
+10.1007/s00253-022-12251-z
+
+# Isolation of commensal bacteria from umbilical cord blood of healthy neonates born by cesarean section
+10.1007/s00284-005-0020-3#Sec1
+
+# Gut microorganisms and their metabolites modulate the severity of acute colitis in a tryptophan metabolism-dependent manner
+10.1007/s00394-020-02194-4
+
+# The influence of air pollution on skin microbiome: a link to skin barrier dysfunction
+10.1007/s00403-024-03448-5
+
+# Evaluation of ocular surface microbiota in children with blepharoconjunctivitis
+10.1007/s00417-025-06836-3
+
+# Influence of neo-adjuvant radiotherapy on the intestinal microbiota of rectal cancer patients
+10.1007/s00432-022-04553-6
+
+# Gut microbiota and fatigue in rectal cancer patients: a cross-sectional pilot study
+10.1007/s00520-021-06013-2
+
+# Effects of Proton Pump Inhibitors on the Small Bowel and Stool Microbiomes
+10.1007/s10620-021-06857-y#Sec30
+
+# Toward accurate vaginal microbiome profiling: protocol, bioinformatics, and core microbiota characterisation
+10.1007/s10815-025-03509-2
+
+# Choline metabolism disorder induced by Prevotella is a risk factor for endometrial cancer in women with polycystic ovary syndrome
+10.1007/s11033-025-10392-8
+
+# The comprehensive evaluation of oral and fecal microbiota in patients with acromegaly
+10.1007/s11102-024-01444-6
+
+# Murine cartilage microbial DNA deposition occurs rapidly following the introduction of a gut microbiome and changes with obesity, aging, and knee osteoarthritis
+10.1007/s11357-023-01004-z
+
+# Effect of chronic cold stress on gut microbial diversity, intestinal inflammation and pyroptosis in mice
+10.1007/s13105-024-01019-w
+
+# Maternal stress in the early postpartum period is associated with alterations in human milk microbiome composition
+10.1016/j.bbi.2024.11.020
+
+# A Gpr35-tuned gut microbe-brain metabolic axis regulates depressive-like behavior
+10.1016/j.chom.2023.12.009
+
+# Microbiota-gut-brain axis drives overeating disorders
+10.1016/j.cmet.2023.09.005
+
+# Unravelling the diversity of Anaplasma species circulating in selected African wildlife hosts by targeted 16S microbiome analysis
+10.1016/j.crmicr.2023.100198
+
+# Exclusive breast-feeding, the early-life microbiome and immune response, and common childhood respiratory illnesses
+10.1016/j.jaci.2022.02.023
+
+# Diversity and composition of gut microbiome of cervical cancer patients: Do results of 16S rRNA sequencing and whole genome sequencing approaches align?
+10.1016/j.mimet.2021.106213
+
+# Prenatal metal exposures and childhood gut microbial signatures are associated with depression score in late childhood
+10.1016/j.scitotenv.2024.170361
+
+# Trace Element Exposure during Pregnancy Has a Persistent Influence on Perinatal Gut Microbiota in Mother–Infant Dyads
+10.1021/acs.est.4c11640
+
+# Probiotic Strain Bifidobacterium animalis subsp. lactis CECT 8145 Reduces Fat Content and Modulates Lipid Metabolism and Antioxidant Response in Caenorhabditis elegans
+10.1021/acs.jafc.5b05934
+
+# Lentil (Lens culinaris Medikus) Diet Affects the Gut Microbiome and Obesity Markers in Rat
+10.1021/acs.jafc.8b03254
+
+# Propionibacterium acnes strain populations in the human skin microbiome associated with acne
+10.1038/jid.2013.21
+
+# Artificial sweeteners induce glucose intolerance by altering the gut microbiota
+10.1038/nature13793
+
+# Dietary emulsifiers impact the mouse gut microbiota promoting colitis and metabolic syndrome
+10.1038/nature14232
+
+# Enrichment of the lung microbiome with gut bacteria in sepsis and the acute respiratory distress syndrome
+10.1038/nmicrobiol.2016.113
+
+# The gut microbiome in social anxiety disorder: evidence of altered composition and function
+10.1038/s41398-023-02325-5
+
+# Immunoregulatory role of the gut microbiota in inflammatory depression
+10.1038/s41467-024-47273-w
+
+# Probiotics impact the antibiotic resistance gene reservoir along the human GI tract in a person-specific and antibiotic-dependent manner
+10.1038/s41564-021-00920-0
+
+# Gut microbiota modulates weight gain in mice after discontinued smoke exposure
+10.1038/s41586-021-04194-8
+
+# DNA extraction approaches substantially influence the assessment of the human breast milk microbiome
+10.1038/s41598-019-55568-y
+
+# The human milk microbiome is minimally associated with breastfeeding practices
+10.1038/s41598-025-03907-7
+
+# One lung ventilation during thoracoscopic lobectomy alters lung microbiome miversity and composition
+10.1038/s41598-025-89233-4
+
+# Population-level Metagenomics Uncovers Distinct Effects of Multiple Medications on the Human Gut Microbiome
+10.1053/j.gastro.2022.06.070
+
+# A case report of improvement on ADHD symptoms after fecal microbiota transplantation with gut microbiome profiling pre- and post-procedure
+10.1080/03007995.2022.2129232
+
+# Linking the bed dust microbiome with environmental factors and child respiratory health
+10.1080/03014460.2025.2509606
+
+# The adjuvant treatment role of ω-3 fatty acids by regulating gut microbiota positively in the acne vulgaris
+10.1080/09546634.2023.2299107
+
+# The effects of topical antimicrobial-corticosteroid combination therapy in comparison to topical steroids alone on the skin microbiome of patients with atopic dermatitis
+10.1080/09546634.2025.2470379
+
+# Vitamin E (α-tocopherol) consumption influences gut microbiota composition
+10.1080/09637486.2019.1639637#abstract
+
+# Investigating the origin of the fetal gut and placenta microbiome in twins
+10.1080/14767058.2021.1936487
+
+# Microbial imbalances linked to early pregnancy loss: a comparative analysis of vaginal microbiota
+10.1080/14767058.2025.2496787
+
+# High intake of dietary fructose in overweight/obese teenagers associated with depletion of Eubacterium and Streptococcus in gut microbiome
+10.1080/19490976.2019.1592420
+
+# The rectal mucosal but not fecal microbiota detects subclinical ulcerative colitis
+10.1080/19490976.2020.1832856
+
+# Maternal consumption of artificially sweetened beverages during pregnancy is associated with infant gut microbiota and metabolic modifications and increased infant body mass index
+10.1080/19490976.2020.1857513
+
+# Links between gut microbiome composition and fatty liver disease in a large population sample
+10.1080/19490976.2021.1888673
+
+# Depression and anxiety in patients with active ulcerative colitis: crosstalk of gut microbiota, metabolomics and proteomics
+10.1080/19490976.2021.1987779
+
+# Obesity is associated with a distinct brain-gut microbiome signature that connects Prevotella and Bacteroides to the brain’s reward center
+10.1080/19490976.2022.2051999
+
+# Non-caloric artificial sweeteners modulate conjugative transfer of multi-drug resistance plasmid in the gut microbiota
+10.1080/19490976.2022.2157698
+
+# Shotgun Metagenomics of Gastric Biopsies Reveals Compositional and Functional Microbiome Shifts in High- and Low-Gastric-Cancer-Risk Populations from Colombia, South America
+10.1080/19490976.2023.2186677
+
+# Obesity is the main driver of altered gut microbiome functions in the metabolically unhealthy
+10.1080/19490976.2023.2246634
+
+# The Impact of Testosterone Therapy on the Vaginal Microbiota of Transgender Men and Nonbinary People: A Prospective Study
+10.1093/infdis/jiaf114/8050099
+
+# Upcycling Human Excrement: The Gut Microbiome to Soil Microbiome Axis
+10.1093/ismeco/ycaf089/8152717
+
+# Association between the lung microbiome and perioperative prognosis in lung transplant recipients
+10.1093/jambio/lxae089
+
+# Drinking Water Temperature Impacts the Pathogenesis of DSS-Induced Ulcerative Colitis by Regulating Intestinal Barrier Function and Remodeling the Gut Microbiota Composition
+10.1096/fj.202500062R
+
+# Mode of Delivery Determines Neonatal Pharyngeal Bacterial Composition and Early Intestinal Colonization
+10.1097/MPG.0000000000001124
+
+# Vaginal microbiome composition in women with HIV undergoing treatment of cervical transformation zone in a screen and treat program in Zambia
+10.1097/QAD.0000000000004187
+
+# Skin bacterial microbiome diversity predicts lower activity levels in female, but not male, guppies, Poecilia reticulata
+10.1098/rsbl.2022.0167
+
+# Multi-site analysis of biosynthetic gene clusters from the periodontitis oral microbiome
+10.1099/jmm.0.001898#tab2
+
+# Consensus approach to differential abundance analysis detects few differences in the oral microbiome of pregnant women due to pre-existing type 2 diabetes mellitus
+10.1099/mgen.0.001385#tab2
+
+# The Neovaginal Microbiota, Symptoms, and Local Immune Correlates in Transfeminine Individuals with Penile Inversion Vaginoplasty
+10.1101/2025.03.14.643288v1
+
+# Host innate and adaptive immunity shapes the gut microbiota biogeography
+10.1111/1348-0421.12963
+
+# Tap water as a natural vehicle for microorganisms shaping the human gut microbiome
+10.1111/1462-2920.15988
+
+# Duration of rupture of membranes and microbiome transmission to the newborn: A prospective study
+10.1111/1471-0528.17774
+
+# The international sinonasal microbiome study: A multicentre, multinational characterization of sinonasal bacterial ecology
+10.1111/all.14276
+
+# Integration of metagenomics-metabolomics reveals specific signatures and functions of airway microbiota in mite-sensitized childhood asthma
+10.1111/all.14438
+
+# Breastfeeding promotes early neonatal regulatory T-cell expansion and immune tolerance of non-inherited maternal antigens
+10.1111/all.14736
+
+# Dupilumab but not cyclosporine treatment shifts the microbiome toward a healthy skin flora in patients with moderate-to-severe atopic dermatitis
+10.1111/all.15742
+
+# Dupilumab Treatment Is Associated With Clinical Improvement and a Shift Toward a Health-Associated Nasal Passage Microbiota in Diffuse Type 2 Chronic Rhinosinusitis
+10.1111/all.16600
+
+# Comparative analysis of endometrial, vaginal, and gut microbiota in patients with and without adenomyosis
+10.1111/aogs.14847
+
+# Cranberry-lingonberry juice affects the gut and urinary microbiome in children - a randomized controlled trial
+10.1111/apm.13292
+
+# Association between polycystic ovary syndrome and the vaginal microbiome: A case-control study
+10.1111/cen.14198
+
+# The gut microbiome in intravenous immunoglobulin-treated chronic inflammatory demyelinating polyneuropathy
+10.1111/ene.15679
+
+# Shifts in the skin microbiome associated with diaper dermatitis and emollient treatment amongst infants and toddlers in China
+10.1111/exd.14028
+
+# Association of early-life gut microbiome and lifestyle factors in the development of eczema in Hong Kong infants
+10.1111/exd.14280
+
+# Long-term changes in the gut microbiota after 14-day bismuth quadruple therapy in penicillin-allergic children
+10.1111/hel.12721
+
+# Lack of significant differences between gastrointestinal tract microbial population structure of Helicobacter pylori-infected subjects before and 2 years after a single eradication event
+10.1111/hel.12748
+
+# Scalp microbiome composition changes and pathway evaluations due to effective treatment with Piroctone Olamine shampoo
+10.1111/ics.12933
+
+# Clinical efficacy of a multilamellar cream on skin physiology and microbiome in an epidermal stress model: A controlled double-blinded study
+10.1111/ics.12950
+
+# The root canal microbiome diversity and function. A whole-metagenome shotgun analysis
+10.1111/iej.13911
+
+# Characterization of Malassezia microbiota in the human external auditory canal and on the sole of the foot
+10.1111/j.1348-0421.2012.00430.x
+
+# Temporal shifts of the microbiome associated with antibiotic treatment of purpuric drug eruptions related to epidermal growth factor receptor inhibitors
+10.1111/jdv.18640
+
+# Bifidobacterium bifidum TMC3115 ameliorates milk protein allergy in by affecting gut microbiota: A randomized double-blind control trial
+10.1111/jfbc.13489
+
+# Heat-treated Limosilactobacillus fermentum LM1020 with menthol, salicylic acid, and panthenol promotes hair growth and regulates hair scalp microbiome balance in androgenetic alopecia: A double-blind, randomized and placebo-controlled clinical trial
+10.1111/jocd.16357
+
+# Microbiome of periodontitis and peri-implantitis before and after therapy: Long-read 16S rRNA gene amplicon sequencing
+10.1111/jre.13269
+
+# Profiling the oral microbiomes in patients with Alzheimer's disease
+10.1111/odi.14110
+
+# Characterization of ocular and nasopharyngeal microbiome in allergic rhinoconjunctivitis
+10.1111/pai.13088
+
+# Skin microbiome profiling reveals the crucial role of microbial metabolites in anti-photoaging
+10.1111/phpp.12987
+
+# Characterization of staphylococcal communities on healthy and allergic feline skin
+10.1111/vde.12885
+
+# Longitudinal evaluation of the cutaneous and rectal microbiota of German shepherd dogs with perianal fistulas undergoing therapy with ciclosporin and ketoconazole
+10.1111/vde.13249
+
+# Landscapes of bacterial and metabolic signatures and their interaction in major depressive disorders
+10.1126/sciadv.aba8555
+
+# Commensal microbiome promotes hair follicle regeneration by inducing keratinocyte HIF-1α signaling and glutamine metabolism
+10.1126/sciadv.abo7555
+
+# Delivery mode and gut microbial changes correlate with an increased risk of childhood asthma
+10.1126/scitranslmed.aax9929
+
+# Macrobdella decora: Old World Leech Gut Microbial Community Structure Conserved in a New World Leech
+10.1128/aem.02082-20
+
+# Microbial Diversity Analysis Using 16S rRNA Gene Amplicon Sequencing of Rhizosphere Soils from Double-Cropping Rice and Rice-Shrimp Farming Systems in Soc Trang, Vietnam
+10.1128/mra.00595-21
+
+# Survey of Maize Rhizosphere Microbiome Using Shotgun Metagenomics
+10.1128/mra.01309-20
+
+# The Gut Microbiome in Autism: Study-Site Effects and Longitudinal Analysis of Behavior Change
+10.1128/msystems.00848-20
+
+# Dynamic Changes in Breast Milk Microbiome in the Early Postpartum Period of Kenyan Women Living with HIV Are Influenced by Antibiotics but Not Antiretrovirals
+10.1128/spectrum.02080-21
+
+# Gonadal sex and chromosome complement influence the gut microbiome in a mouse model of allergic airway inflammation
+10.1152/physiolgenomics.00003.2024
+
+# Yellow Wine Polyphenolic Compound Protects Against Doxorubicin-Induced Cardiotoxicity by Modulating the Composition and Metabolic Function of the Gut Microbiota
+10.1161/CIRCHEARTFAILURE.120.008220
+
+# The Airway Microbiota Modulates Effect of Azithromycin Treatment for Episodes of Recurrent Asthma-like Symptoms in Preschool Children: A Randomized Clinical Trial
+10.1164/rccm.202008-3226OC
+
+# The Lung Microbiome Predicts Mortality and Response to Azithromycin in Lung Transplant Recipients with Chronic Rejection
+10.1164/rccm.202308-1326OC
+
+# Metagenomic Analysis Reveals Difference of Gut Microbiota in ADHD
+10.1177/10870547231225491
+
+# Associations Between Gut Microbial Features and Sickness Symptoms in Kidney Transplant Recipients
+10.1177/10998004241227560
+
+# Dysbiosis of Fecal Microbiota in Allergic Rhinitis Patients
+10.1177/1945892420920477
+
+# Gut microbiota dysbiosis and bacterial community assembly associated with cholesterol gallstones in large-scale study
+10.1186/1471-2164-14-669
+
+# Machine learning framework for gut microbiome biomarkers discovery and modulation analysis in large-scale obese population
+10.1186/s12864-022-09087-2
+
+# Optimisation of methods for bacterial skin microbiome investigation: primer selection and comparison of the 454 versus MiSeq platform
+10.1186/s12866-017-0927-4
+
+# Skin dysbiosis in the microbiome in atopic dermatitis is site-specific and involves bacteria, fungus and virus
+10.1186/s12866-021-02302-2
+
+# Dysbiosis of skin microbiome and gut microbiome in melanoma progression
+10.1186/s12866-022-02458-5
+
+# Significantly different results in the ocular surface microbiome detected by tear paper and conjunctival swab
+10.1186/s12866-023-02775-3
+
+# Alterations of the bile microbiome is associated with progression-free survival in pancreatic ductal adenocarcinoma patients
+10.1186/s12866-024-03371-9
+
+# An altered uterine microbiota with endometrial hyperplasia
+10.1186/s12866-024-03379-1
+
+# Full-length 16S rRNA Sequencing Reveals Gut Microbiome Signatures Predictive of MASLD in children with obesity
+10.1186/s12866-025-03849-0#Abs1
+
+# Gut Bifidobacteria enrichment following oral Lactobacillus-supplementation is associated with clinical improvements in children with cystic fibrosis
+10.1186/s12890-022-02078-9
+
+# Bile acid is a significant host factor shaping the gut microbiome of diet-induced obese mice
+10.1186/s12915-017-0462-7
+
+# Multi-omics gut microbiome signatures in obese women: role of diet and uncontrolled eating behavior
+10.1186/s12916-022-02689-3
+
+# Gut microbiome in endometriosis: a cohort study on 1000 individuals
+10.1186/s12916-024-03503-y
+
+# The lung microbiome in end-stage Lymphangioleiomyomatosis
+10.1186/s12931-021-01873-y
+
+# Altered fecal microbiome and metabolome in adult patients with non-cystic fibrosis bronchiectasis
+10.1186/s12931-022-02229-w
+
+# Metatranscriptomic analysis to define the Secrebiome, and 16S rRNA profiling of the gut microbiome in obesity and metabolic syndrome of Mexican children
+10.1186/s12934-020-01319-y
+
+# Chronic endometritis and the endometrial microbiota: implications for reproductive success in patients with recurrent implantation failure
+10.1186/s12941-024-00710-6
+
+# Unveiling the dynamics of the breast milk microbiome: impact of lactation stage and gestational age
+10.1186/s12967-023-04656-9
+
+# Gut microbiota, circulating cytokines and dementia: a Mendelian randomization study
+10.1186/s12974-023-02999-0
+
+# Lung-gut axis of microbiome alterations following co-exposure to ultrafine carbon black and ozone
+10.1186/s12989-023-00528-8
+
+# Population structure of human gut bacteria in a diverse cohort from rural Tanzania and Botswana
+10.1186/s13059-018-1616-9
+
+# Gut microbiome composition in the Hispanic Community Health Study/Study of Latinos is shaped by geographic relocation, environmental factors, and obesity
+10.1186/s13059-019-1831-z
+
+# Characterization of the bacterial microbiome of Swedish ticks through 16S rRNA amplicon sequencing of whole ticks and of individual tick organs
+10.1186/s13071-022-05638-4
+
+# Ethnic and diet-related differences in the healthy infant microbiome
+10.1186/s13073-017-0421-5
+
+# Interactions between the gut microbiome and host gene regulation in cystic fibrosis
+10.1186/s13073-020-0710-2
+
+# The vaginal microbiota and innate immunity after local excisional treatment for cervical intraepithelial neoplasia
+10.1186/s13073-021-00977-w
+
+# Colorectal cancer microbiome programs DNA methylation of host cells by affecting methyl donor metabolism
+10.1186/s13073-024-01344-1
+
+# Early-life and concurrent predictors of the healthy adolescent microbiome in a cohort study
+10.1186/s13073-025-01481-1
+
+# Gamma -aminobutyric acid ameliorates neurological impairments in type 1 diabetes mellitus mice by regulating the “gut flora-LPS-TLR4-NF-ΚB” signalling Axis
+10.1186/s13098-025-01752-2#data-availability
+
+# Alteration of the cutaneous microbiome in psoriasis and potential role in Th17 polarization
+10.1186/s40168-018-0533-1
+
+# Diet, obesity, and the gut microbiome as determinants modulating metabolic outcomes in a non-human primate model
+10.1186/s40168-021-01069-y
+
+# Fecal microbiota transplantation protects rotenone-induced Parkinson's disease mice via suppressing inflammation mediated by the lipopolysaccharide-TLR4 signaling pathway through the microbiota-gut-brain axis
+10.1186/s40168-021-01107-9
+
+# Circadian dynamics of the teleost skin immune-microbiome interface
+10.1186/s40168-021-01160-4
+
+# Evaluating the ecological hypothesis: early life salivary microbiome assembly predicts dental caries in a longitudinal case-control study
+10.1186/s40168-022-01442-5
+
+# Microbiome and tryptophan metabolomics analysis in adolescent depression: roles of the gut microbiota in the regulation of tryptophan-derived neurotransmitters and behaviors in human and mice
+10.1186/s40168-023-01589-9
+
+# Antimicrobial peptides modulate lung injury by altering the intestinal microbiota
+10.1186/s40168-023-01673-0
+
+# Placental TLR recognition of salivary and subgingival microbiota is associated with pregnancy complications
+10.1186/s40168-024-01761-9
+
+# Intact lung tissue and bronchoalveolar lavage fluid are both suitable for the evaluation of murine lung microbiome in acute lung injury
+10.1186/s40168-024-01772-6
+
+# Global soil metagenomics reveals distribution and predominance of Deltaproteobacteria in nitrogen-fixing microbiome
+10.1186/s40168-024-01812-1
+
+# Distinct gut microbiome characteristics and dynamics in patients with Parkinson’s disease based on the presence of premotor rapid-eye movement sleep behavior disorders
+10.1186/s40168-025-02095-w#:~:text=%2A%20Jae,Woo%20Bae%5E%7B1%7D%20%26%20%2A%20%E2%80%A6
+
+# Microbiome multi-omics analysis reveals novel biomarkers and mechanisms linked with CD etiopathology
+10.1186/s40364-025-00802-1
+
+# Strain heterogeneity, cooccurrence network, taxonomic composition and functional profile of the healthy ocular surface microbiome
+10.1186/s40662-021-00228-4
+
+# Metagenomics and metabarcoding experimental choices and their impact on microbial community characterization in freshwater recirculating aquaculture systems
+10.1186/s40793-023-00459-z
+
+# Development of the Human Infant Intestinal Microbiota
+10.1371/journal.pbio.0050177
+
+# Characterization of the Gut Microbial Community of Obese Patients Following a Weight-Loss Intervention Using Whole Metagenome Shotgun Sequencing
+10.1371/journal.pone.0149564
+
+# Molecular analysis of the endobronchial stent microbial biofilm reveals bacterial communities that associate with stent material and frequent fungal constituents
+10.1371/journal.pone.0217306
+
+# Combining physicochemical properties and microbiome data to evaluate the water quality of South African drinking water production plants
+10.1371/journal.pone.0237335
+
+# Comparing the gut microbiome of obese, African American, older adults with and without mild cognitive impairment
+10.1371/journal.pone.0280211
+
+# Shotgun metagenomic analysis of saliva microbiome suggests Mogibacterium as a factor associated with chronic bacterial osteomyelitis
+10.1371/journal.pone.0302569
+
+# Cervicovaginal microbiome and natural history of HPV in a longitudinal study
+10.1371/journal.ppat.1008376
+
+# A steroid-resistant cockroach allergen model is associated with lung and cecal microbiome changes
+10.14814/phy2.15761
+
+# Spatial Variation in the Healthy Human Lung Microbiome and the Adapted Island Model of Lung Biogeography
+10.1513/AnnalsATS.201501-029OC
+
+# Upper Respiratory Dysbiosis with a Facultative-dominated Ecotype in Advanced Lung Disease and Dynamic Change after Lung Transplant
+10.1513/AnnalsATS.201904-299OC
+
+# Characterization of the lung microbiome and exploration of potential bacterial biomarkers for lung cancer
+10.21037/tlcr-19-590
+
+# Whole genome sequencing revealed microbiome in lung adenocarcinomas presented as ground-glass nodules
+10.21037/tlcr.2019.06.11
+
+# Gut Microbiome Alterations in Patients With Visceral Obesity Based on Quantitative Computed Tomography
+10.3389/fcimb.2021.823262/full
+
+# Characterization of the oral and gut microbiome in children with obesity aged 3 to 5 years
+10.3389/fcimb.2023.1102650/full
+
+# Investigations of microbiota composition and neuroactive pathways in association with symptoms of stress and depression in a cohort of healthy women
+10.3389/fcimb.2024.1324794/full
+
+# Exploring the composition of placental microbiome and its potential origin in preterm birth
+10.3389/fcimb.2024.1486409/full
+
+# The intratumoral microbiota heterogenicity is related to the prognosis and tumorigenesis of cervical cancer
+10.3389/fcimb.2025.1574511/full
+
+# The protective effect of the intestinal microbiota in type-1 diabetes in NOD mice is limited to a time window in early life
+10.3389/fendo.2024.1425235/full
+
+# Microbiome Analysis of Malacopathogenic Nematodes Suggests No Evidence of a Single Bacterial Symbiont Responsible for Gastropod Mortality
+10.3389/fimmu.2022.878783/full
+
+# Metagenomic insights into the composition and function of the gut microbiota of mice infected with Toxoplasma gondii
+10.3389/fimmu.2023.1156397/full
+
+# Distinct microbial signatures and their predictive value in recurrent acute pancreatitis: insights from 5-region 16S rRNA gene sequencing
+10.3389/fimmu.2025.1558983/full
+
+# Compositional and Functional Microbiome Variation Between Tubes of an Intertidal Polychaete and Surrounding Marine Sediment
+10.3389/fmars.2021.656506/full
+
+# Interactions between Obesity Status and Dietary Intake of Monounsaturated and Polyunsaturated Oils on Human Gut Microbiome Profiles in the Canola Oil Multicenter Intervention Trial (COMIT)
+10.3389/fmicb.2016.01612/fulll
+
+# Human Milk Microbiome and Maternal Postnatal Psychosocial Distress
+10.3389/fmicb.2019.02333
+
+# Distinct Changes Occur in the Human Breast Milk Microbiome Between Early and Established Lactation in Breastfeeding Guatemalan Mothers
+10.3389/fmicb.2021.557180
+
+# Microbiome Profiling Using Shotgun Metagenomic Sequencing Identified Unique Microorganisms in COVID-19 Patients With Altered Gut Microbiota
+10.3389/fmicb.2021.712081/full
+
+# Influence of plant genotype and soil on the cotton rhizosphere microbiome
+10.3389/fmicb.2022.1021064
+
+# Shotgun Metagenomics of Deep Forest Soil Layers Show Evidence of Altered Microbial Genetic Potential for Biogeochemical Cycling"
+10.3389/fmicb.2022.828977/full
+
+# Prokaryotic and eukaryotic microbial diversity from three soda lakes in the East African Rift Valley determined by amplicon sequencing
+10.3389/fmicb.2022.999876/full
+
+# Shotgun metagenomics reveals the gut microbial diversity and functions in Vespa mandarinia (Hymenoptera: Vespidae) at multiple life stages
+10.3389/fmicb.2024.1288051/full#h3
+
+# Metagenomic profiling of viral and microbial communities from the pox lesions of lumpy skin disease virus and sheeppox virus-infected hosts
+10.3389/fvets.2024.1321202/full
+
+# Sputum Microbiome Composition in Patients with Squamous Cell Lung Carcinoma
+10.3390/life12091365
+
+# Feeding Expressed Breast Milk Alters the Microbial Network of Breast Milk and Increases Breast Milk Microbiome Diversity over Time
+10.3390/microorganisms13010012

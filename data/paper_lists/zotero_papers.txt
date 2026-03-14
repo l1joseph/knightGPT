@@ -1,0 +1,213 @@
+# KnightGPT Paper List — Imported from Zotero
+# Collection: entire library
+# 70 papers with DOIs
+
+# Gut Microbiota Regulate Motor Deficits and Neuroinflammation in a Model of Parkinson’s Disease
+10.1016/j.cell.2016.11.018
+
+# Guidelines for the Provision and Assessment of Nutrition Support Therapy in the Adult Critically Ill Patient
+10.1177/0148607115621863
+
+# Metabolites produced by commensal bacteria promote peripheral regulatory T-cell generation
+10.1038/nature12726
+
+# The Microbial Metabolites, Short-Chain Fatty Acids, Regulate Colonic T <sub>reg</sub> Cell Homeostasis
+10.1126/science.1241165
+
+# Impact of diet in shaping gut microbiota revealed by a comparative study in children from Europe and rural Africa
+10.1073/pnas.1005963107
+
+# Biological properties of extracellular vesicles and their physiological functions
+10.3402/jev.v4.27066
+
+# A human gut microbial gene catalogue established by metagenomic sequencing
+10.1038/nature08821
+
+# Metagenomic and metabolomic analyses reveal distinct stage-specific phenotypes of the gut microbiota in colorectal cancer
+10.1038/s41591-019-0458-7
+
+# MetaboAnalyst 6.0: towards a unified platform for metabolomics data processing, analysis and interpretation
+10.1093/nar/gkae253
+
+# Large-scale association analyses identify host factors influencing human gut microbiome composition
+10.1038/s41588-020-00763-1
+
+# 2016 update of the PRIDE database and its related tools
+10.1093/nar/gkv1145
+
+# The Human Microbiome Project
+10.1038/nature06244
+
+# The Integrative Human Microbiome Project
+10.1038/s41586-019-1238-8
+
+# Fundamentals of Microbial Community Resistance and Resilience
+10.3389/fmicb.2012.00417
+
+# mixOmics: An R package for ‘omics feature selection and multiple data integration
+10.1371/journal.pcbi.1005752
+
+# The PRIDE database resources in 2022: a hub for mass spectrometry-based proteomics evidences
+10.1093/nar/gkab1038
+
+# mixOmics: An R package for ‘omics feature selection and multiple data integration
+10.1371/journal.pcbi.1005752
+
+# metaSPAdes: a new versatile metagenomic assembler
+10.1101/gr.213959.116
+
+# ColabFold: making protein folding accessible to all
+10.1038/s41592-022-01488-1
+
+# VSEARCH: a versatile open source tool for metagenomics
+10.7717/peerj.2584
+
+# CheckM: assessing the quality of microbial genomes recovered from isolates, single cells, and metagenomes
+10.1101/gr.186072.114
+
+# Plant biostimulants: Definition, concept, main categories and regulation
+10.1016/j.scienta.2015.09.021
+
+# Mash: fast genome and metagenome distance estimation using MinHash
+10.1186/s13059-016-0997-x
+
+# UniFrac: an effective distance metric for microbial community comparison
+10.1038/ismej.2010.133
+
+# Evaluation of general 16S ribosomal RNA gene PCR primers for classical and next-generation sequencing-based diversity studies
+10.1093/nar/gks808
+
+# Predictive functional profiling of microbial communities using 16S rRNA marker gene sequences
+10.1038/nbt.2676
+
+# A framework for human microbiome research
+10.1038/nature11209
+
+# The UNITE database for molecular identification of fungi: handling dark taxa and parallel taxonomic classifications
+10.1093/nar/gky1022
+
+# The Human Microbiome Project
+10.1038/nature06244
+
+# Ultra-high-throughput microbial community analysis on the Illumina HiSeq and MiSeq platforms
+10.1038/ismej.2012.8
+
+# Dysfunction of the intestinal microbiome in inflammatory bowel disease and treatment
+10.1186/gb-2012-13-9-r79
+
+# Anticancer immunotherapy by CTLA-4 blockade relies on the gut microbiota
+10.1126/science.aad1329
+
+# mixOmics: An R package for ‘omics feature selection and multiple data integration
+10.1371/journal.pcbi.1005752
+
+# The PRIDE database resources in 2022: a hub for mass spectrometry-based proteomics evidences
+10.1093/nar/gkab1038
+
+# Gut microbiome development along the colorectal adenoma–carcinoma sequence
+10.1038/ncomms7528
+
+# The global, regional, and national burden of inflammatory bowel disease in 195 countries and territories, 1990–2017: a systematic analysis for the Global Burden of Disease Study 2017
+10.1016/s2468-1253(19)30333-4
+
+# Reporting animal research: Explanation and elaboration for the ARRIVE guidelines 2.0
+10.1371/journal.pbio.3000411
+
+# Hallmarks of Cancer: New Dimensions
+10.1158/2159-8290.cd-21-1059
+
+# Management of Immune-Related Adverse Events in Patients Treated With Immune Checkpoint Inhibitor Therapy: ASCO Guideline Update
+10.1200/jco.21.01440
+
+# Fulminant Myocarditis with Combination Immune Checkpoint Blockade
+10.1056/nejmoa1609214
+
+# The human tumor microbiome is composed of tumor type–specific intracellular bacteria
+10.1126/science.aay9189
+
+# Dementia prevention, intervention, and care: 2024 report of the Lancet standing Commission
+10.1016/s0140-6736(24)01296-0
+
+# Gut microbiome modulates response to anti–PD-1 immunotherapy in melanoma patients
+10.1126/science.aan4236
+
+# Inflammation and tumor progression: signaling pathways and targeted intervention
+10.1038/s41392-021-00658-5
+
+# Ingestion of <i>Lactobacillus</i> strain regulates emotional behavior and central GABA receptor expression in a mouse via the vagus nerve
+10.1073/pnas.1102999108
+
+# Large-scale association analyses identify host factors influencing human gut microbiome composition
+10.1038/s41588-020-00763-1
+
+# Gut microbiome alterations in Alzheimer’s disease
+10.1038/s41598-017-13601-y
+
+# Host microbiota constantly control maturation and function of microglia in the CNS
+10.1038/nn.4030
+
+# Normal gut microbiota modulates brain development and behavior
+10.1073/pnas.1010529108
+
+# Microbiota Modulate Behavioral and Physiological Abnormalities Associated with Neurodevelopmental Disorders
+10.1016/j.cell.2013.11.024
+
+# The global, regional, and national burden of inflammatory bowel disease in 195 countries and territories, 1990–2017: a systematic analysis for the Global Burden of Disease Study 2017
+10.1016/s2468-1253(19)30333-4
+
+# EASL Clinical Practice Guidelines for the management of patients with decompensated cirrhosis
+10.1016/j.jhep.2018.03.024
+
+# European Guidelines for Obesity Management in Adults
+10.1159/000442721
+
+# mixOmics: An R package for ‘omics feature selection and multiple data integration
+10.1371/journal.pcbi.1005752
+
+# Gut Microbiota Regulate Motor Deficits and Neuroinflammation in a Model of Parkinson’s Disease
+10.1016/j.cell.2016.11.018
+
+# Kraken: ultrafast metagenomic sequence classification using exact alignments
+10.1186/gb-2014-15-3-r46
+
+# The Human Microbiome Project
+10.1038/nature06244
+
+# Global, regional, and national prevalence of overweight and obesity in children and adults during 1980–2013: a systematic analysis for the Global Burden of Disease Study 2013
+10.1016/s0140-6736(14)60460-8
+
+# CheckM: assessing the quality of microbial genomes recovered from isolates, single cells, and metagenomes
+10.1101/gr.186072.114
+
+# The PRIDE database resources in 2022: a hub for mass spectrometry-based proteomics evidences
+10.1093/nar/gkab1038
+
+# A human gut microbial gene catalogue established by metagenomic sequencing
+10.1038/nature08821
+
+# Optimizing taxonomic classification of marker-gene amplicon sequences with QIIME 2’s q2-feature-classifier plugin
+10.1186/s40168-018-0470-z
+
+# Ultra-high-throughput microbial community analysis on the Illumina HiSeq and MiSeq platforms
+10.1038/ismej.2012.8
+
+# VSEARCH: a versatile open source tool for metagenomics
+10.7717/peerj.2584
+
+# Structure, function and diversity of the healthy human microbiome
+10.1038/nature11234
+
+# An improved Greengenes taxonomy with explicit ranks for ecological and evolutionary analyses of bacteria and archaea
+10.1038/ismej.2011.139
+
+# Evaluation of general 16S ribosomal RNA gene PCR primers for classical and next-generation sequencing-based diversity studies
+10.1093/nar/gks808
+
+# Predictive functional profiling of microbial communities using 16S rRNA marker gene sequences
+10.1038/nbt.2676
+
+# UCHIME improves sensitivity and speed of chimera detection
+10.1093/bioinformatics/btr381
+
+# phyloseq: An R Package for Reproducible Interactive Analysis and Graphics of Microbiome Census Data
+10.1371/journal.pone.0061217

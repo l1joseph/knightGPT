@@ -1,365 +1,317 @@
-# KnightGPT - Microbiome Knowledge Graph RAG System
+# KnightGPT
 
-A Retrieval-Augmented Generation (RAG) system specialized in microbiome research, using knowledge graph-based retrieval with vLLM for inference on AMD MI300A APUs (SDSC Cosmos Cluster).
+A Retrieval-Augmented Generation (RAG) system for microbiome research, with knowledge graph-based retrieval, multi-agent reasoning, and domain-specific tools. Runs on SDSC Cosmos cluster (AMD MI300A APUs) using vLLM for inference.
 
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Data Ingestion Pipeline                       │
-├─────────────────┬─────────────────┬─────────────────────────────────┤
-│  Google Form    │   Web Scraper   │      Manual Upload              │
-│   Webhook       │    (Scrapy)     │      (FastAPI)                  │
-└────────┬────────┴────────┬────────┴────────┬────────────────────────┘
-         │                 │                 │
-         └─────────────────┼─────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     PDF → Markdown Conversion                        │
-│                   (marker-pdf / PyMuPDF4LLM)                        │
-└────────────────────────────┬────────────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Semantic Chunking                               │
-│               (Paragraph-level with metadata)                        │
-└────────────────────────────┬────────────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Embedding Generation                              │
-│        vLLM Server (Alibaba-NLP/gte-Qwen2-7B-instruct)             │
-└────────────────────────────┬────────────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Knowledge Graph                                  │
-│              (NetworkX + Neo4j for persistence)                      │
-└────────────────────────────┬────────────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Inference API                                    │
-│   vLLM OpenAI-Compatible Server (meta-llama/Llama-3.3-70B-Instruct)│
-└────────────────────────────┬────────────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Web Interface                                   │
-│          Open WebUI (https://knight-lab-dev.org)                    │
-│                 Cloudflare + Watchtower                              │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## Repository Structure
+## Architecture
 
 ```
-knightGPT/
-├── data/
-│   ├── raw_pdfs/                # Source PDF files
-│   ├── markdown/                # Converted markdown files
-│   └── processed/               # Processed chunks and embeddings
-│
-├── docs/
-│   ├── DEPLOYMENT.md            # Deployment guide for Cosmos cluster
-│   └── USAGE.md                 # Post-deployment and daily usage guide
-│
-├── scripts/
-│   ├── ingest_pipeline.py       # Full ingestion pipeline runner
-│   ├── bug_detection.py         # Comprehensive bug detection script
-│   ├── healthcheck.py           # Service health monitoring
-│   └── monitor.py               # Continuous monitoring daemon
-│
-├── slurm/
-│   ├── vllm_embedding.slurm     # SLURM job for embedding server
-│   └── vllm_inference.slurm     # SLURM job for inference server
-│
-├── src/
-│   ├── ingestion/
-│   │   ├── __init__.py
-│   │   ├── pdf_reader.py        # PDF metadata extraction
-│   │   ├── pdf_to_markdown.py   # PDF → Markdown conversion
-│   │   ├── google_form_webhook.py # Google Form integration
-│   │   └── web_scraper.py       # Web scraping module
-│   │
-│   ├── chunking/
-│   │   ├── __init__.py
-│   │   └── chunker.py           # Semantic paragraph chunking
-│   │
-│   ├── embedding/
-│   │   ├── __init__.py
-│   │   └── embedder.py          # vLLM embedding client
-│   │
-│   ├── graph/
-│   │   ├── __init__.py
-│   │   └── builder.py           # Knowledge graph construction
-│   │
-│   ├── storage/
-│   │   ├── __init__.py
-│   │   └── storage.py           # Neo4j persistence layer
-│   │
-│   ├── retrieval/
-│   │   ├── __init__.py
-│   │   └── retriever.py         # Graph-based RAG retriever
-│   │
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── main.py              # FastAPI application (all endpoints)
-│   │
-│   ├── utils/
-│   │   ├── __init__.py
-│   │   ├── logging.py           # Centralized logging
-│   │   └── config.py            # Configuration management
-│   │
-│   └── cli.py                   # CLI interface
-│
-├── tests/
-│   ├── __init__.py
-│   ├── conftest.py              # Pytest fixtures
-│   ├── test_chunking.py         # Chunking module tests
-│   ├── test_embedding.py        # Embedding module tests
-│   ├── test_graph.py            # Graph module tests
-│   ├── test_retrieval.py        # Retrieval module tests
-│   ├── test_integration.py      # Integration tests
-│   └── test_api.py              # API endpoint tests
-│
-├── docker/
-│   ├── Dockerfile.api           # API server container
-│   └── docker-compose.yaml      # Full stack deployment
-│
-├── requirements.txt             # Python dependencies
-├── pytest.ini                   # Pytest configuration
-└── README.md                    # This file
+Paper Sources (DOI lists, Zotero, RSS, mmc_datasheet.tsv)
+    │
+    ▼
+Download & Convert (Unpaywall/PMC → PDF → marker-pdf/PyMuPDF4LLM → Markdown)
+    │
+    ▼
+Semantic Chunking (paragraph-level, 500 token max, section-aware)
+    │
+    ▼
+Embedding (vLLM: gte-Qwen2-7B-instruct, 3584-dim vectors)
+    │
+    ▼
+Knowledge Graph (NetworkX, cosine similarity ≥ 0.7, max 10 neighbors)
+    │
+    ▼
+┌──────────────────────────────────────────────────────────┐
+│  FastAPI Server (port 8080)                              │
+│  ├── /api/v1/chat         RAG chat (streaming SSE)       │
+│  ├── /api/v1/search       Semantic search + citations    │
+│  ├── /api/v1/agent/chat   Multi-agent pipeline           │
+│  ├── /api/v1/ingest       PDF/RSS ingestion              │
+│  └── /v1/chat/completions OpenAI-compatible (Open WebUI) │
+└──────────────────────────────────────────────────────────┘
+    │
+    ▼
+vLLM Servers (SLURM + Singularity on MI300A)
+├── Embedding: gte-Qwen2-7B-instruct (1 GPU, port 8001)
+└── Inference: Qwen2.5-72B-Instruct  (4 GPU TP, port 8000)
 ```
 
-## Quick Start
+## Quick Start (Cosmos Cluster)
 
-### Prerequisites
-
-- Access to SDSC Cosmos cluster with MI300A APUs (for production)
-- Python 3.10+
-- ROCm 6.2+ (pre-installed on Cosmos, or local setup for development)
-- Neo4j (optional, for persistent graph storage)
-- vLLM servers running (embedding and inference)
-
-### 1. Setup Environment on Cosmos
+### 1. Environment Setup
 
 ```bash
-# Clone repository
 git clone https://github.com/l1joseph/knightGPT.git
 cd knightGPT
 
 # Create conda environment
-conda create -n knightgpt python=3.11 -y
-conda activate knightgpt
-
-# Install dependencies
+conda env create -f environment.mi300a.yml   # or:
+conda create -n knightGPT python=3.10 -y && conda activate knightGPT
 pip install -r requirements.txt
 ```
 
-### 2. Start vLLM Servers (via SLURM)
+### 2. Configure
 
 ```bash
-# Submit embedding server job
-sbatch slurm/vllm_embedding.slurm
-
-# Submit inference server job
-sbatch slurm/vllm_inference.slurm
+cp .env.example .env
+# Edit .env — set paths, Zotero keys, HF_TOKEN, etc.
+# Cosmos scratch paths: /cosmos/vast/scratch/$USER/knightgpt/data/...
 ```
 
-### 3. Build Knowledge Graph
+### 3. Start vLLM Servers
 
 ```bash
-# Convert PDFs to markdown
-python -m src.ingestion.pdf_to_markdown data/raw_pdfs/ data/markdown/
+sbatch slurm/vllm_embedding_v1.slurm    # Embedding server
+sbatch slurm/vllm_inference_v1.slurm     # Inference server
 
-# Run full ingestion pipeline
-python scripts/ingest_pipeline.py \
-    --input data/markdown/ \
-    --output data/processed/ \
-    --embedding-url http://localhost:8001/v1 \
-    --threshold 0.7
+# Wait ~5 min for model loading, check status:
+squeue -u $USER
 
-# Or start from PDFs
-python scripts/ingest_pipeline.py \
-    --input data/raw_pdfs/ \
-    --output data/processed/ \
-    --embedding-url http://localhost:8001/v1
+# Update .env with assigned node hostnames:
+# VLLM_EMBEDDING_URL=http://<embedding-node>:8001/v1
+# VLLM_INFERENCE_URL=http://<inference-node>:8000/v1
+
+# Verify servers:
+curl -s http://<embedding-node>:8001/v1/models
+curl -s http://<inference-node>:8000/v1/models
 ```
 
-### 4. Run Inference API
+### 4. Ingest Papers
 
 ```bash
-# Start FastAPI server
+conda activate knightGPT
+
+# From DOI list (downloads OA PDFs, converts, chunks, embeds, builds graph)
+python scripts/download_papers.py \
+  --input data/paper_lists/initial_papers.txt --run-pipeline
+
+# From Zotero library (discovers papers via OpenAlex, adds to Zotero, ingests)
+python scripts/populate_zotero.py --run-pipeline
+
+# From TSV dataset
+python scripts/download_papers.py \
+  --input data/paper_lists/mmc_papers.txt --run-pipeline
+```
+
+### 5. Start API Server
+
+```bash
 python -m src.api.main --host 0.0.0.0 --port 8080
 ```
 
-### 5. Verify Installation
+### 6. Access from Local Machine
 
 ```bash
-# Run health check
-python scripts/healthcheck.py
+# SSH tunnel (match the login node where API is running — check with `hostname`)
+ssh -L 8080:localhost:8080 l1joseph@cosmos02.cosmos.sdsc.edu
 
-# Run bug detection
-python scripts/bug_detection.py
-
-# Run tests
-pytest tests/
+# Then open in browser:
+# http://localhost:8080/health    — health check
+# http://localhost:8080/docs      — Swagger UI
 ```
-
-### 6. Use CLI Interface (Alternative to API)
-
-```bash
-# Interactive chat interface
-python -m src.cli \
-    --chunks data/processed/chunks_with_emb.json \
-    --graph data/processed/graph.graphml \
-    --top-k 5
-```
-
-### 7. Deploy Web Interface
-
-```bash
-# Using docker-compose
-cd docker && docker-compose up -d
-```
-
-## Key Features
-
-- **Knowledge Graph RAG**: Graph-based retrieval for improved context understanding
-- **Multiple Ingestion Methods**: PDF upload, Google Forms webhook, web scraping
-- **Comprehensive Testing**: Unit, integration, and API tests with bug detection
-- **Health Monitoring**: Real-time health checks and continuous monitoring
-- **OpenAI-Compatible API**: Works with Open WebUI and other OpenAI-compatible clients
-- **CLI Interface**: Terminal-based chat interface for quick queries
-- **Production-Ready**: Error handling, input validation, and robust error recovery
-
-## Model Selection
-
-### Embedding Model
-
-**Alibaba-NLP/gte-Qwen2-7B-instruct** - 7B parameter embedding model
-
-- High-quality embeddings for scientific text
-- 8192 token context window
-- Optimized for semantic similarity
-
-### Inference Model
-
-**meta-llama/Llama-3.3-70B-Instruct** - 70B parameter chat model
-
-- State-of-the-art reasoning capabilities
-- 128K context window
-- Tensor parallelism across 4 MI300A APUs
-
-## Configuration
-
-### Environment Variables
-
-```bash
-# vLLM Servers
-export VLLM_EMBEDDING_URL="http://localhost:8001/v1"
-export VLLM_INFERENCE_URL="http://localhost:8000/v1"
-
-# Neo4j (optional)
-export NEO4J_URI="bolt://localhost:7687"
-export NEO4J_USER="neo4j"
-export NEO4J_PASSWORD="your_password"
-
-# AMD MI300A Optimizations
-export VLLM_ROCM_USE_AITER=1
-export PYTORCH_ROCM_ARCH="gfx942"
-```
-
-## Web Application
-
-The web interface is hosted at `https://knight-lab-dev.org` using:
-
-- **Open WebUI**: Self-hosted ChatGPT-like interface
-- **Cloudflare**: SSL/CDN/DNS management
-- **Watchtower**: Automatic container updates
-
-### Features
-
-- Multi-model chat interface
-- RAG with citations
-- Document upload
-- Conversation history
-- User authentication
 
 ## API Endpoints
 
-| Endpoint         | Method | Description                  |
-| ---------------- | ------ | ---------------------------- |
-| `/health`        | GET    | Service health status        |
-| `/api/v1/chat`   | POST   | RAG-enhanced chat completion |
-| `/api/v1/ingest` | POST   | Ingest new documents         |
-| `/api/v1/search` | POST   | Semantic search              |
-| `/api/v1/webhook/google-form` | POST | Google Form webhook |
-| `/v1/models`     | GET    | List models (OpenAI-compatible) |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Server status, chunk/graph counts |
+| `/api/v1/chat` | POST | RAG chat with citations (supports `stream: true`) |
+| `/api/v1/search` | POST | Semantic search with similarity scores |
+| `/api/v1/agent/chat` | POST | Multi-agent: Plan → Tools → Verify → Generate |
+| `/api/v1/ingest` | POST | PDF ingestion (background task) |
+| `/api/v1/ingest/rss` | POST | RSS feed discovery + ingestion |
+| `/api/v1/ingest/briefing` | POST | Briefing text parsing |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat |
+| `/v1/models` | GET | List models |
+| `/api/v1/webhook/google-form` | POST | Google Form webhook |
 
-See [docs/USAGE.md](docs/USAGE.md) for detailed API usage examples.
-
-## SDSC Cosmos Cluster Notes
-
-### Resource Allocation
-
-- Each MI300A has 128GB HBM3 memory
-- 4 APUs per node (512GB total)
-- Use `--tensor-parallel-size 4` for 70B models
-
-### SLURM Configuration
+### Example: RAG Chat
 
 ```bash
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
+curl -s http://localhost:8080/api/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"How does QIIME2 handle diversity analysis?","top_k":5,"max_tokens":500}' \
+  | python3 -m json.tool
 ```
+
+### Example: Multi-Agent Chat
+
+```bash
+curl -s http://localhost:8080/api/v1/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"What KEGG pathways are involved in butyrate production by gut bacteria?","top_k":5}' \
+  | python3 -m json.tool
+```
+
+### Example: Semantic Search
+
+```bash
+curl -s http://localhost:8080/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"UniFrac distance","top_k":5}' \
+  | python3 -m json.tool
+```
+
+## Multi-Agent System (Phase 6)
+
+The `/api/v1/agent/chat` endpoint uses a 4-stage pipeline:
+
+1. **Planner** — LLM analyzes the query, selects tools, creates sub-queries
+2. **Executor** — Runs selected tools + RAG retrieval in parallel
+3. **Verifier** — Checks citation relevance
+4. **Generator** — Produces final answer with verified citations
+
+Available tools:
+- `pubmed_search` — PubMed biomedical literature search
+- `openalex_search` — OpenAlex academic works with citation data
+- `kegg_lookup` — KEGG metabolic pathways and compounds
+- `qiime2_docs` — QIIME 2 methods and plugins
+
+## Zotero Integration
+
+The `ZoteroTool` (`src/tools/zotero.py`) connects to Zotero libraries for paper discovery:
+
+```python
+from src.tools.zotero import ZoteroTool
+
+zt = ZoteroTool()  # reads ZOTERO_* from .env
+zt.execute(action="collections")          # list collections
+zt.execute(action="items", collection_id="BPKGGFEA")  # browse collection
+zt.execute(action="search", query="microbiome")        # search library
+zt.execute(action="dois")                 # extract DOIs for pipeline
+zt.save_dois_to_file(output_path=Path("data/paper_lists/zotero_papers.txt"))
+```
+
+The `scripts/populate_zotero.py` script:
+1. Searches OpenAlex for papers across 5 microbiome topics
+2. Creates Zotero collections and adds items
+3. Extracts DOIs via `ZoteroTool`
+4. Downloads PDFs and runs the full ingestion pipeline
+
+## Data Pipeline
+
+### Paper Sources
+
+| Source | File | Papers |
+|--------|------|--------|
+| Knight Lab core | `data/paper_lists/initial_papers.txt` | 28 DOIs |
+| Zotero/OpenAlex | `data/paper_lists/zotero_papers.txt` | 70 DOIs |
+| MMC dataset | `data/paper_lists/mmc_papers.txt` | 194 DOIs |
+
+### Pipeline Steps
+
+```bash
+# Full pipeline: download → convert → chunk → embed → graph
+python scripts/download_papers.py --input data/paper_lists/initial_papers.txt --run-pipeline
+
+# Or step by step:
+python scripts/ingest_pipeline.py \
+  --input /cosmos/vast/scratch/l1joseph/knightgpt/data/raw_pdfs \
+  --output /cosmos/vast/scratch/l1joseph/knightgpt/data/processed \
+  --threshold 0.7
+```
+
+### Output Artifacts (on scratch)
+
+| File | Size | Description |
+|------|------|-------------|
+| `chunks.json` | 11 MB | 6,179 text chunks with metadata |
+| `chunks_with_emb.json` | 578 MB | Chunks + 3584-dim embeddings |
+| `graph.graphml` | 17 MB | 6,173 nodes, 37,286 edges |
+
+## vLLM on MI300A (ROCm)
+
+### ENCODER_ONLY Bug Fix
+
+vLLM 0.6.6's `rocm_flash_attn.py` doesn't handle `ENCODER_ONLY` attention type, which embedding models use with `--task embedding`. The embedding SLURM script (`slurm/vllm_embedding_v1.slurm`) patches this at runtime by:
+
+1. Extracting `rocm_flash_attn.py` from the Singularity container
+2. Adding an `ENCODER_ONLY` branch (uses `seq_lens` like DECODER, but `causal_mask=False`)
+3. Bind-mounting the patched file over the original
+
+### Container
+
+- Image: `~/vllm_rocm_0.6.6.sif` (vLLM 0.6.6, ROCm 6.3.1, Python 3.12)
+- ROCm arch: `gfx942` (MI300A)
+
+## Project Structure
+
+```
+knightGPT/
+├── src/
+│   ├── api/main.py              # FastAPI app (11 endpoints)
+│   ├── agents/orchestrator.py   # Multi-agent pipeline (4 stages)
+│   ├── retrieval/retriever.py   # GraphRAGRetriever + RAGEngine
+│   ├── embedding/embedder.py    # VLLMEmbedder (batch, retry, async)
+│   ├── chunking/chunker.py      # SemanticChunker (tiktoken)
+│   ├── graph/builder.py         # KnowledgeGraphBuilder (NetworkX)
+│   ├── tools/                   # PubMed, OpenAlex, KEGG, QIIME2, Zotero
+│   ├── ingestion/               # PDF, RSS, web scraper, briefing parser
+│   ├── storage/storage.py       # Neo4j persistence (optional)
+│   ├── utils/config.py          # Pydantic BaseSettings
+│   └── cli.py                   # Rich terminal chat interface
+├── scripts/
+│   ├── download_papers.py       # DOI → PDF → pipeline
+│   ├── populate_zotero.py       # Zotero + OpenAlex discovery
+│   ├── ingest_pipeline.py       # 5-stage ingestion orchestrator
+│   ├── healthcheck.py           # Service health monitoring
+│   └── auto_ingest.py           # Automated ingestion
+├── slurm/
+│   ├── vllm_embedding_v1.slurm  # Embedding server (with ENCODER_ONLY patch)
+│   ├── vllm_inference_v1.slurm  # Inference server (Qwen2.5-72B, TP=4)
+│   └── weekly_ingest.slurm      # Automated weekly ingestion
+├── data/paper_lists/            # DOI lists for ingestion
+├── docker/docker-compose.yaml   # Full stack deployment
+├── tests/                       # pytest (unit, integration, api markers)
+├── .env                         # Configuration (not in git)
+├── .env.example                 # Template
+└── requirements.txt             # Python dependencies
+```
+
+## Configuration
+
+All settings via `.env` file (see `.env.example`). Key variables:
+
+| Variable | Description |
+|----------|-------------|
+| `VLLM_EMBEDDING_URL` | Embedding server URL (update after sbatch) |
+| `VLLM_INFERENCE_URL` | Inference server URL (update after sbatch) |
+| `VLLM_INFERENCE_MODEL` | `Qwen/Qwen2.5-72B-Instruct` |
+| `GRAPH_SIMILARITY_THRESHOLD` | Edge creation threshold (default: 0.7) |
+| `INGEST_RAW_PDF_DIR` | PDF storage on scratch |
+| `INGEST_PROCESSED_DIR` | Artifact storage on scratch |
+| `ZOTERO_LIBRARY_ID` | Zotero user library ID |
+| `ZOTERO_API_KEY` | Zotero API key (read+write) |
+| `HF_TOKEN` | HuggingFace token (for gated models) |
 
 ## Testing
 
-Run the comprehensive test suite:
-
 ```bash
-# Run all tests
-pytest tests/
-
-# Run specific test module
-pytest tests/test_chunking.py
-
-# Run with coverage
-pytest tests/ --cov=src --cov-report=html
+conda activate knightGPT
+pytest tests/ -v              # 30 pass, 10 known failures
+pytest tests/ -v -m unit      # unit tests only
+pytest tests/ -v -m api       # API tests
 ```
 
-## Monitoring
-
-Monitor system health:
+## Restart Procedure
 
 ```bash
-# One-time health check
-python scripts/healthcheck.py
+# 1. Submit vLLM servers
+sbatch slurm/vllm_embedding_v1.slurm
+sbatch slurm/vllm_inference_v1.slurm
 
-# Continuous monitoring
-python scripts/monitor.py --interval 60
+# 2. Wait ~5 min, get node hostnames
+squeue -u $USER
 
-# Save health report
-python scripts/healthcheck.py --output health_report.json
+# 3. Update .env with new hostnames
+
+# 4. Start API
+conda activate knightGPT && python -m src.api.main --host 0.0.0.0 --port 8080
+
+# 5. SSH tunnel from local machine
+ssh -L 8080:localhost:8080 l1joseph@<login-node>.cosmos.sdsc.edu
 ```
 
-## Documentation
-
-- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Complete deployment guide for SDSC Cosmos cluster
-- **[USAGE.md](docs/USAGE.md)** - Post-deployment operations and day-to-day usage guide
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Run tests and bug detection: `pytest tests/ && python scripts/bug_detection.py`
-4. Submit a pull request
-
-## License
-
-MIT License
-
-## Authors:
+## Authors
 
 - Leo [@l1joseph](https://github.com/l1joseph)
 - Dani [@drahmanucsd](https://github.com/drahmanucsd)

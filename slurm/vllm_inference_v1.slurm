@@ -18,8 +18,13 @@ module purge
 module load rocm/6.3.0
 module load singularitypro
 
+# Load HF_TOKEN from .env if not already set
+if [ -z "$HF_TOKEN" ] && [ -f "${HOME}/knightGPT/.env" ]; then
+    export HF_TOKEN=$(grep '^HF_TOKEN=' "${HOME}/knightGPT/.env" | cut -d= -f2)
+fi
+
 # Model configuration
-MODEL_NAME="meta-llama/Llama-3.3-70B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 PORT=8000
 TENSOR_PARALLEL=4
 SIF_IMAGE="${HOME}/vllm_rocm_0.6.6.sif"
@@ -32,6 +37,7 @@ echo "Node: $(hostname)"
 
 singularity exec --rocm \
     --bind /cosmos/vast/scratch/$USER:/workspace \
+    --env HF_TOKEN="${HF_TOKEN}" \
     ${SIF_IMAGE} \
     vllm serve "${MODEL_NAME}" \
         --port ${PORT} \
