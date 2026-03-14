@@ -277,24 +277,23 @@ class Neo4jStorage:
     ) -> list[Chunk]:
         """
         Get subgraph around specified chunks.
-        
+
         Args:
             chunk_ids: Starting chunk IDs
             hops: Number of hops to traverse
-            
+
         Returns:
             List of chunks in subgraph
         """
         with self.driver.session(database=self.database) as session:
+            # Use variable-length path pattern (works on all Neo4j editions
+            # including Aura Free which lacks APOC)
             result = session.run("""
                 MATCH (start:Chunk)
                 WHERE start.id IN $ids
-                CALL apoc.path.subgraphNodes(start, {
-                    maxLevel: $hops,
-                    relationshipFilter: "SIMILAR_TO"
-                }) YIELD node
+                MATCH (start)-[:SIMILAR_TO*1..$hops]-(node:Chunk)
                 RETURN DISTINCT node
-            """, ids=chunk_ids, hops=hops)
+            """.replace("$hops", str(int(hops))), ids=chunk_ids)
             
             chunks = []
             for record in result:

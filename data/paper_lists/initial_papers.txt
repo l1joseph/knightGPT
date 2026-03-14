@@ -1,0 +1,112 @@
+# KnightGPT Initial Paper List — Knight Lab & Microbiome Foundations
+# Format: DOI (one per line), comments start with #
+# These are seminal open-access papers for the initial knowledge graph.
+
+# === Knight Lab Core Publications ===
+
+# QIIME 2: Reproducible, interactive, scalable, and extensible microbiome data science (2019)
+10.1038/s41587-019-0209-9
+
+# UniFrac: a new phylogenetic method for comparing microbial communities (2005)
+10.1128/AEM.71.12.8228-8235.2005
+
+# Unweighted UniFrac distances are more robust than weighted (2007)
+10.1038/ismej.2010.133
+
+# EMPeror: a tool for visualizing high-throughput microbial community data (2013)
+10.1186/2047-217X-2-16
+
+# Deblur rapidly resolves single-nucleotide community sequence patterns (2017)
+10.1128/mSystems.00191-16
+
+# Qiita: rapid, web-enabled microbiome meta-analysis (2018)
+10.1038/s41592-018-0141-9
+
+# The Microsetta Initiative: a microbiome citizen science project (2019)
+10.1128/mSystems.00199-19
+
+# Songbird: multinomial regression for differential abundance (2019)
+10.1038/s41467-019-10656-5
+
+# Gemelli: Compositional Tensor Factorization (2023)
+10.1038/s41587-023-01803-9
+
+# DEICODE: robust Aitchison PCA for sparse compositional data (2019)
+10.1128/mSystems.00016-19
+
+# === Earth Microbiome Project (EMP) ===
+
+# A communal catalogue reveals Earth's multiscale microbial diversity (2017)
+10.1038/nature24621
+
+# Earth Microbiome Project: best practices for amplicon studies (2018)
+10.1038/s41579-018-0029-9
+
+# === Human Microbiome Project (HMP) ===
+
+# Structure, function and diversity of the healthy human microbiome (2012)
+10.1038/nature11234
+
+# A framework for human microbiome research (2012)
+10.1038/nature11209
+
+# The Integrative Human Microbiome Project (2019)
+10.1038/s41586-019-1238-8
+
+# === American Gut / Microsetta ===
+
+# American Gut: an Open Platform for Citizen Science Microbiome Research (2018)
+10.1128/mSystems.00031-18
+
+# === Foundational Methods ===
+
+# DADA2: High-resolution sample inference from Illumina amplicon data (2016)
+10.1038/nmeth.3869
+
+# Exact sequence variants should replace OTUs in marker-gene data analysis (2017)
+10.1038/ismej.2017.119
+
+# Compositional data analysis of the microbiome (2018)
+10.1146/annurev-statistics-042720-124436
+
+# Establishing microbial composition measurement standards (2020)
+10.1038/s41467-020-19867-3
+
+# === Microbiome & Disease ===
+
+# Gut microbiota in human adults with type 2 diabetes (2010)
+10.1371/journal.pone.0009085
+
+# Role of the gut microbiota in nutrition and health (2018)
+10.1136/bmj.k2179
+
+# The gut microbiome in neurological disorders (2020)
+10.1016/S1474-4422(20)30377-7
+
+# Gut microbiome and cancer immunotherapy (2019)
+10.1126/science.aar8429
+
+# === Bioinformatics Tools ===
+
+# Phylogenetic placement of exact amplicon sequences improves associations (2019)
+10.1128/mSystems.00021-18
+
+# Striped UniFrac: enabling microbiome analysis at unprecedented scale (2018)
+10.1038/s41592-018-0187-8
+
+# Unifrac: an effective distance metric for microbial community comparison (2011)
+10.1038/ismej.2010.133
+
+# scikit-bio: A Bioinformatics Library for Data Scientists (software)
+# (no DOI - GitHub project)
+
+# === Review Papers ===
+
+# Best practices for analysing microbiomes (2018)
+10.1038/s41579-018-0029-9
+
+# Current understanding of the human microbiome (2018)
+10.1038/s41591-018-0104-2
+
+# Microbiome research and multi-omics integration (2023)
+10.1038/s41576-023-00645-0
