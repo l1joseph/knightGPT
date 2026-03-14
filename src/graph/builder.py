@@ -113,7 +113,7 @@ class KnowledgeGraphBuilder:
             edge_count = 0
             for i in range(n):
                 similarities = []
-                
+
                 for j in range(n):
                     if i != j:
                         try:
@@ -126,25 +126,25 @@ class KnowledgeGraphBuilder:
                         except Exception as e:
                             logger.warning(f"Error computing similarity: {e}")
                             continue
+
+                # Keep only top neighbors
+                similarities.sort(key=lambda x: x[1], reverse=True)
+
+                for j, sim in similarities[:self.max_neighbors]:
+                    chunk_i = chunks_with_emb[i]
+                    chunk_j = chunks_with_emb[j]
+
+                    if not self.graph.has_edge(chunk_i.id, chunk_j.id):
+                        self.graph.add_edge(
+                            chunk_i.id,
+                            chunk_j.id,
+                            weight=sim,
+                            similarity=sim,
+                        )
+                        edge_count += 1
         except Exception as e:
             logger.error(f"Error building graph: {e}")
             return self.graph
-            
-            # Keep only top neighbors
-            similarities.sort(key=lambda x: x[1], reverse=True)
-            
-            for j, sim in similarities[:self.max_neighbors]:
-                chunk_i = chunks_with_emb[i]
-                chunk_j = chunks_with_emb[j]
-                
-                if not self.graph.has_edge(chunk_i.id, chunk_j.id):
-                    self.graph.add_edge(
-                        chunk_i.id,
-                        chunk_j.id,
-                        weight=sim,
-                        similarity=sim,
-                    )
-                    edge_count += 1
         
         logger.info(
             f"Graph built: {self.graph.number_of_nodes()} nodes, "

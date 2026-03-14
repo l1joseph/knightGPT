@@ -23,7 +23,7 @@ def sample_chunks():
             text="This is the first test chunk with some content.",
             source_file="test.md",
             section="Introduction",
-            embedding=[0.1] * 768,
+            embedding=[0.1] * 3584,
             token_count=10,
         ),
         Chunk(
@@ -31,7 +31,7 @@ def sample_chunks():
             text="This is the second test chunk with different content.",
             source_file="test.md",
             section="Methods",
-            embedding=[0.2] * 768,
+            embedding=[0.2] * 3584,
             token_count=12,
         ),
         Chunk(
@@ -39,7 +39,7 @@ def sample_chunks():
             text="This is the third test chunk with more content.",
             source_file="test2.md",
             section="Results",
-            embedding=[0.3] * 768,
+            embedding=[0.3] * 3584,
             token_count=11,
         ),
     ]
