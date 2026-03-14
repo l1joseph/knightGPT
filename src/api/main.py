@@ -534,6 +534,42 @@ async def briefing_webhook(
     return await ingest_briefing(briefing_req, background_tasks)
 
 
+class AgentChatRequest(BaseModel):
+    """Agent chat request."""
+
+    message: str = Field(..., description="User message")
+    top_k: int = Field(default=5, description="RAG retrieval depth")
+
+
+@app.post("/api/v1/agent/chat")
+async def agent_chat(request: AgentChatRequest):
+    """
+    Multi-agent RAG chat with tool use.
+
+    Uses a 4-stage pipeline (plan → execute → verify → generate)
+    with access to PubMed, OpenAlex, KEGG, and QIIME2 tools.
+    """
+    from ..agents import AgentOrchestrator
+
+    orchestrator = AgentOrchestrator(
+        retriever=_retriever,
+        rag_engine=_rag_engine,
+    )
+
+    result = orchestrator.run(request.message, top_k=request.top_k)
+
+    return {
+        "answer": result.final_answer,
+        "plan": {
+            "tools_used": result.plan.tools_to_use if result.plan else [],
+            "sub_queries": result.plan.sub_queries if result.plan else [],
+            "reasoning": result.plan.reasoning if result.plan else "",
+        },
+        "citations": result.verified_citations[:10],
+        "tool_results_count": len(result.tool_results),
+    }
+
+
 @app.post("/api/v1/webhook/google-form")
 async def google_form_webhook(
     request: Request,
@@ -541,7 +577,7 @@ async def google_form_webhook(
 ):
     """
     Webhook endpoint for Google Form submissions.
-    
+
     Automatically processes uploaded PDF files.
     """
     webhook = get_webhook_handler()
