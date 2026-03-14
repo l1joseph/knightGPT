@@ -423,6 +423,117 @@ async def ingest_from_rss(
     return {"status": "accepted", "message": "RSS ingestion started in background"}
 
 
+class BriefingRequest(BaseModel):
+    """Briefing ingestion request."""
+
+    text: str = Field(..., description="Briefing text content")
+    papers: Optional[list[dict]] = Field(
+        default=None,
+        description="Explicit paper list [{doi, url, title, summary}]",
+    )
+    source: str = Field(default="manual", description="Source identifier")
+    sync_neo4j: bool = Field(default=False, description="Sync to Neo4j")
+
+
+@app.post("/api/v1/ingest/briefing")
+async def ingest_briefing(
+    request: BriefingRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Ingest papers from a briefing (email, bot, or manual paste).
+
+    Parses text for DOIs, downloads PDFs, and runs ingestion.
+    Accepts both free-form text and structured paper lists.
+    """
+    from ..ingestion.briefing_parser import parse_briefing_text, parse_briefing_json
+
+    # Parse the briefing
+    if request.papers:
+        parsed = parse_briefing_json({
+            "text": request.text,
+            "papers": request.papers,
+            "source": request.source,
+        })
+    else:
+        parsed = parse_briefing_text(request.text, source=request.source)
+
+    if not parsed.papers:
+        return {
+            "status": "no_papers",
+            "message": "No paper references found in briefing",
+        }
+
+    async def process_briefing():
+        try:
+            from ..ingestion.rss_feed import RSSFeedIngester, DiscoveredPaper
+
+            ingester = RSSFeedIngester()
+            papers = []
+            for ref in parsed.papers:
+                papers.append(
+                    DiscoveredPaper(
+                        title=ref.title or "Unknown",
+                        doi=ref.doi,
+                        url=ref.url,
+                        abstract=ref.summary,
+                        source_feed=f"briefing:{request.source}",
+                    )
+                )
+
+            stats = ingester.download_and_ingest(papers)
+            logger.info(f"Briefing ingestion: {stats}")
+
+            if request.sync_neo4j and stats.get("downloaded", 0) > 0:
+                from ..storage import sync_to_neo4j
+                chunks_file = settings.ingestion.processed_dir / "chunks_with_emb.json"
+                graph_file = settings.graph.graph_path
+                if chunks_file.exists():
+                    sync_to_neo4j(chunks_file, graph_file)
+
+        except Exception as e:
+            logger.error(f"Briefing ingestion failed: {e}", exc_info=True)
+
+    background_tasks.add_task(process_briefing)
+
+    return {
+        "status": "accepted",
+        "papers_found": len(parsed.papers),
+        "dois": [p.doi for p in parsed.papers if p.doi],
+        "message": f"Processing {len(parsed.papers)} papers from briefing",
+    }
+
+
+@app.post("/api/v1/webhook/briefing")
+async def briefing_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Webhook for direct briefing bot integration.
+
+    Requires shared secret in X-Webhook-Secret header.
+    Accepts JSON payload with text and optional paper list.
+    """
+    # Verify shared secret
+    webhook_secret = settings.api.api_key
+    if webhook_secret:
+        provided_secret = request.headers.get("X-Webhook-Secret")
+        if provided_secret != webhook_secret:
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    data = await request.json()
+
+    briefing_req = BriefingRequest(
+        text=data.get("text", ""),
+        papers=data.get("papers"),
+        source=data.get("source", "webhook"),
+        sync_neo4j=data.get("sync_neo4j", True),
+    )
+
+    return await ingest_briefing(briefing_req, background_tasks)
+
+
 @app.post("/api/v1/webhook/google-form")
 async def google_form_webhook(
     request: Request,

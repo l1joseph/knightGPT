@@ -239,6 +239,54 @@ class KnowledgeGraphBuilder:
         
         return [chunk_map[cid] for cid in result_ids if cid in chunk_map]
 
+    def add_citation_edges(
+        self,
+        citing_source: str,
+        cited_sources: list[str],
+    ) -> int:
+        """
+        Add CITED_BY edges between chunks from different papers.
+
+        Connects all chunks from cited papers to chunks from the citing
+        paper, enabling cross-reference traversal in the knowledge graph.
+
+        Args:
+            citing_source: Source file of the citing paper
+            cited_sources: Source files of cited papers
+
+        Returns:
+            Number of edges added
+        """
+        # Find chunk IDs by source file
+        citing_nodes = [
+            n for n, d in self.graph.nodes(data=True)
+            if d.get("source_file") == citing_source
+        ]
+        if not citing_nodes:
+            return 0
+
+        edge_count = 0
+        for cited_source in cited_sources:
+            cited_nodes = [
+                n for n, d in self.graph.nodes(data=True)
+                if d.get("source_file") == cited_source
+            ]
+            # Connect first chunk of each (representative link)
+            if cited_nodes:
+                self.graph.add_edge(
+                    citing_nodes[0],
+                    cited_nodes[0],
+                    weight=0.5,
+                    edge_type="CITED_BY",
+                )
+                edge_count += 1
+
+        if edge_count:
+            logger.info(
+                f"Added {edge_count} CITED_BY edges from {citing_source}"
+            )
+        return edge_count
+
     def save_graph(self, path: Path) -> None:
         """
         Save graph to GraphML file.

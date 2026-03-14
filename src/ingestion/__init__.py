@@ -20,6 +20,7 @@ from .pdf_to_markdown import (
 )
 from .web_scraper import MicrobiomeScraper, ScrapedDocument, run_scheduled_scrape
 from .rss_feed import RSSFeedIngester, DiscoveredPaper, PaperTracker
+from .briefing_parser import parse_briefing_text, parse_briefing_json, ParsedBriefing
 
 __all__ = [
     # PDF processing
@@ -45,4 +46,8 @@ __all__ = [
     "RSSFeedIngester",
     "DiscoveredPaper",
     "PaperTracker",
+    # Briefing parser
+    "parse_briefing_text",
+    "parse_briefing_json",
+    "ParsedBriefing",
 ]
