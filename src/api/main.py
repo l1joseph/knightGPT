@@ -368,6 +368,61 @@ async def ingest_documents(
     return {"status": "accepted", "message": "Ingestion started in background"}
 
 
+class RSSIngestRequest(BaseModel):
+    """RSS feed ingestion request."""
+
+    feeds: Optional[list[str]] = Field(
+        default=None,
+        description="Feed names to check (None = all)",
+    )
+    max_papers: int = Field(default=20, description="Max papers to ingest")
+    sync_neo4j: bool = Field(default=False, description="Sync to Neo4j")
+
+
+@app.post("/api/v1/ingest/rss")
+async def ingest_from_rss(
+    request: RSSIngestRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Trigger RSS feed discovery and ingestion.
+
+    Discovers papers from configured RSS feeds, downloads PDFs,
+    and runs the ingestion pipeline.
+    """
+    async def process_rss():
+        try:
+            from ..ingestion.rss_feed import RSSFeedIngester, DEFAULT_FEEDS
+
+            feeds = None
+            if request.feeds:
+                feeds = {k: v for k, v in DEFAULT_FEEDS.items() if k in request.feeds}
+
+            ingester = RSSFeedIngester(feeds=feeds)
+            papers = ingester.discover_from_rss()
+            papers = papers[:request.max_papers]
+
+            if papers:
+                stats = ingester.download_and_ingest(papers)
+                logger.info(f"RSS ingestion: {stats}")
+
+                if request.sync_neo4j and stats.get("downloaded", 0) > 0:
+                    from ..storage import sync_to_neo4j
+                    chunks_file = settings.ingestion.processed_dir / "chunks_with_emb.json"
+                    graph_file = settings.graph.graph_path
+                    if chunks_file.exists():
+                        sync_to_neo4j(chunks_file, graph_file)
+            else:
+                logger.info("No new papers found in RSS feeds")
+
+        except Exception as e:
+            logger.error(f"RSS ingestion failed: {e}", exc_info=True)
+
+    background_tasks.add_task(process_rss)
+
+    return {"status": "accepted", "message": "RSS ingestion started in background"}
+
+
 @app.post("/api/v1/webhook/google-form")
 async def google_form_webhook(
     request: Request,

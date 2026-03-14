@@ -153,6 +153,37 @@ class IngestionSettings(BaseSettings):
     )
 
 
+class RSSSettings(BaseSettings):
+    """RSS feed ingestion configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable RSS feed discovery",
+    )
+    check_interval_hours: int = Field(
+        default=168,
+        description="Hours between RSS checks (default: weekly)",
+    )
+    kl_tools_api_url: Optional[str] = Field(
+        default=None,
+        description="kl-tools API URL for paper discovery",
+    )
+    max_papers_per_run: int = Field(
+        default=50,
+        description="Maximum papers to ingest per run",
+    )
+    filter_keywords: bool = Field(
+        default=True,
+        description="Filter papers by microbiome keywords",
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="RSS_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+
 class APISettings(BaseSettings):
     """API server configuration."""
 
@@ -188,6 +219,7 @@ class Settings(BaseSettings):
     graph: GraphSettings = Field(default_factory=GraphSettings)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
+    rss: RSSSettings = Field(default_factory=RSSSettings)
     api: APISettings = Field(default_factory=APISettings)
 
     # General settings

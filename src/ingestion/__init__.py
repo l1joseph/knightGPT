@@ -19,6 +19,7 @@ from .pdf_to_markdown import (
     extract_metadata_from_pdf,
 )
 from .web_scraper import MicrobiomeScraper, ScrapedDocument, run_scheduled_scrape
+from .rss_feed import RSSFeedIngester, DiscoveredPaper, PaperTracker
 
 __all__ = [
     # PDF processing
@@ -40,4 +41,8 @@ __all__ = [
     "MicrobiomeScraper",
     "ScrapedDocument",
     "run_scheduled_scrape",
+    # RSS feed ingestion
+    "RSSFeedIngester",
+    "DiscoveredPaper",
+    "PaperTracker",
 ]

@@ -41,9 +41,10 @@ pyvis>=0.3.2
 # Neo4j (optional persistence)
 neo4j>=5.16.0
 
-# Web scraping
+# Web scraping & RSS
 scrapy>=2.11.0
 requests>=2.31.0
+feedparser>=6.0
 
 # Google Forms integration
 google-api-python-client>=2.116.0
