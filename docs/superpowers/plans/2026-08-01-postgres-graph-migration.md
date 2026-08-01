@@ -1841,11 +1841,39 @@ def _embedding_to_vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(repr(x) for x in embedding) + "]"
 
 
+REPO_ROOT = Path(__file__).parent.parent
+DEFAULT_PAPER_LISTS_DIR = REPO_ROOT / "data" / "paper_lists"
+
+
+def _build_doi_lookup(paper_lists_dir: Path) -> dict[str, str]:
+    """Map sanitized-filename-safe DOI (as produced by download_papers.py's
+    safe_name transform) back to the real DOI, using the checked-in DOI
+    list files as the source of truth."""
+    from scripts.download_papers import parse_doi_file
+
+    lookup = {}
+    for doi_file in paper_lists_dir.glob("*.txt"):
+        for doi in parse_doi_file(doi_file):
+            safe_name = doi.replace("/", "_").replace(".", "-")
+            lookup[safe_name] = doi
+    return lookup
+
+
+def _resolve_doi(source_file: str, doi_lookup: dict[str, str]) -> str:
+    """Best-effort DOI resolution from a chunk's source_file. Falls back to
+    the raw source_file (old behavior) if no match is found — e.g. for
+    papers ingested by a path that didn't go through the DOI-list-driven
+    download flow."""
+    stem = Path(source_file).stem if source_file else ""
+    return doi_lookup.get(stem, source_file)
+
+
 async def migrate(
     dsn: str,
     chunks_path: Path,
     graph_path: Path,
     dry_run: bool = False,
+    paper_lists_dir: Path = DEFAULT_PAPER_LISTS_DIR,
 ) -> dict:
     """Migrate chunks_with_emb.json + graph.graphml into Postgres.
 
@@ -1854,17 +1882,24 @@ async def migrate(
         chunks_path: path to chunks_with_emb.json
         graph_path: path to graph.graphml
         dry_run: if True, only count what would be migrated, write nothing
+        paper_lists_dir: directory of DOI list files used to resolve real
+            DOIs from chunk.source_file (which for the existing file-based
+            pipeline is a markdown file path, not a DOI)
 
     Returns:
         Stats dict with chunks_migrated, edges_migrated, papers_migrated
     """
     chunks = load_chunks(chunks_path)
     graph = nx.read_graphml(str(graph_path)) if graph_path.exists() else nx.Graph()
+    doi_lookup = _build_doi_lookup(paper_lists_dir)
 
-    papers_seen = set()
+    # papers_seen maps doi -> a representative source_file, used only for
+    # the title fallback below (there's no real title in chunk metadata).
+    papers_seen: dict[str, str] = {}
     for chunk in chunks:
         if chunk.source_file:
-            papers_seen.add(chunk.source_file)
+            doi = _resolve_doi(chunk.source_file, doi_lookup)
+            papers_seen.setdefault(doi, chunk.source_file)
 
     edges = [
         (u, v, float(graph[u][v].get("similarity", 0.5)))
@@ -1881,14 +1916,14 @@ async def migrate(
 
     conn = await asyncpg.connect(dsn)
     try:
-        for source_file in papers_seen:
+        for doi, source_file in papers_seen.items():
             await conn.execute(
                 """
                 INSERT INTO papers (doi, title, metadata)
                 VALUES ($1, $2, '{}'::jsonb)
                 ON CONFLICT (doi) DO NOTHING
                 """,
-                source_file,
+                doi,
                 Path(source_file).stem,
             )
 
@@ -1904,7 +1939,7 @@ async def migrate(
                 ON CONFLICT (id) DO NOTHING
                 """,
                 chunk.id,
-                chunk.source_file or None,
+                _resolve_doi(chunk.source_file, doi_lookup) if chunk.source_file else None,
                 chunk.text,
                 _embedding_to_vector_literal(chunk.embedding),
                 chunk.section,
