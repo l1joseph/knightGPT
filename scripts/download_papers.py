@@ -10,7 +10,7 @@ Resolves DOIs to PDFs via multiple strategies:
 Usage:
     python scripts/download_papers.py --input data/paper_lists/initial_papers.txt
     python scripts/download_papers.py --input data/paper_lists/initial_papers.txt --output $SCRATCH/knightgpt/data/raw_pdfs
-    python scripts/download_papers.py --input data/paper_lists/initial_papers.txt --sync-neo4j
+    python scripts/download_papers.py --input data/paper_lists/initial_papers.txt --run-pipeline
 """
 
 import argparse
@@ -235,11 +235,6 @@ def main():
         action="store_true",
         help="Run full ingestion pipeline after download",
     )
-    parser.add_argument(
-        "--sync-neo4j",
-        action="store_true",
-        help="Sync to Neo4j after pipeline (implies --run-pipeline)",
-    )
     parser.add_argument("--log-level", type=str, default="INFO")
 
     args = parser.parse_args()
@@ -261,7 +256,7 @@ def main():
     logger.info(f"Stats saved to {stats_file}")
 
     # Optionally run full pipeline
-    if args.run_pipeline or args.sync_neo4j:
+    if args.run_pipeline:
         from scripts.ingest_pipeline import run_pipeline
 
         logger.info("Running ingestion pipeline...")

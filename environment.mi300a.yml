@@ -48,7 +48,6 @@ dependencies:
 
       # Graph / persistence
       - pyvis>=0.3.2
-      - neo4j>=5.16.0
 
       # Scraping / requests
       - scrapy>=2.11.0

@@ -49,33 +49,6 @@ class VLLMSettings(BaseSettings):
     )
 
 
-class Neo4jSettings(BaseSettings):
-    """Neo4j database configuration."""
-
-    uri: str = Field(
-        default="bolt://localhost:7687",
-        description="Neo4j connection URI",
-    )
-    user: str = Field(
-        default="neo4j",
-        description="Neo4j username",
-    )
-    password: str = Field(
-        default="password",
-        description="Neo4j password",
-    )
-    database: str = Field(
-        default="neo4j",
-        description="Neo4j database name",
-    )
-
-    model_config = SettingsConfigDict(
-        env_prefix="NEO4J_",
-        env_file=".env",
-        extra="ignore",
-    )
-
-
 class PostgresSettings(BaseSettings):
     """Postgres (pgGraph + pgContext) database configuration."""
 
@@ -238,7 +211,6 @@ class Settings(BaseSettings):
     """Main application settings."""
 
     vllm: VLLMSettings = Field(default_factory=VLLMSettings)
-    neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     graph: GraphSettings = Field(default_factory=GraphSettings)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)

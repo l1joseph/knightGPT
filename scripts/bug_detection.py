@@ -25,7 +25,6 @@ from src.chunking import Chunk, SemanticChunker, load_chunks, save_chunks
 from src.embedding import VLLMEmbedder
 from src.graph import KnowledgeGraphBuilder
 from src.retrieval import GraphRAGRetriever, RAGEngine
-from src.storage import Neo4jStorage
 from src.utils import get_logger, get_settings
 
 logger = get_logger(__name__)
@@ -286,42 +285,6 @@ class BugDetector:
 
         self.test_results[module] = "PASSED"
 
-    def test_storage_module(self):
-        """Test storage module for bugs."""
-        print("\n=== Testing Storage Module ===")
-        module = "storage"
-
-        try:
-            # Test 1: Invalid Neo4j connection
-            try:
-                storage = Neo4jStorage(uri="bolt://invalid:7687", user="test", password="test")
-                storage.close()
-                self.report_warning(module, "__init__", "Should validate connection on init")
-            except Exception:
-                pass  # Expected to fail
-
-            # Test 2: Write empty chunks
-            # Can't test without real connection, but check code logic
-
-            # Test 3: Invalid chunk data
-            # Check if metadata handling is safe
-            storage_file = Path(__file__).parent.parent / "src" / "storage" / "storage.py"
-            if storage_file.exists():
-                content = storage_file.read_text()
-                if "chunk.metadata.items()" in content:
-                    # Check if there's type checking
-                    if "isinstance(value" not in content:
-                        self.report_warning(
-                            module,
-                            "write_chunks",
-                            "Should validate metadata value types",
-                        )
-
-            self.test_results[module] = "PASSED"
-        except Exception as e:
-            self.report_bug(module, "general", f"Exception during testing: {e}")
-            self.test_results[module] = "FAILED"
-
     def test_file_operations(self):
         """Test file I/O operations for bugs."""
         print("\n=== Testing File Operations ===")
@@ -383,7 +346,6 @@ class BugDetector:
         self.test_graph_module()
         self.test_retrieval_module()
         self.test_api_module()
-        self.test_storage_module()
         self.test_file_operations()
 
         print("\n" + "=" * 60)

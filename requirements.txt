@@ -39,8 +39,6 @@ sentence-transformers>=2.3.0  # Fallback for local embeddings
 networkx>=3.2
 pyvis>=0.3.2
 
-# Neo4j (optional persistence)
-neo4j>=5.16.0
 
 # Web scraping & RSS
 scrapy>=2.11.0

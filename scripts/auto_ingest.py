@@ -3,14 +3,14 @@
 Automated paper discovery and ingestion for KnightGPT.
 
 Discovers papers from RSS feeds and kl-tools API, downloads PDFs,
-runs the full ingestion pipeline (chunk → embed → graph → Neo4j).
+runs the full ingestion pipeline (chunk → embed → graph).
 
 Usage:
     # Discover + download only
     python scripts/auto_ingest.py
 
-    # Full pipeline with Neo4j sync
-    python scripts/auto_ingest.py --run-pipeline --sync-neo4j
+    # Full pipeline
+    python scripts/auto_ingest.py --run-pipeline
 
     # Custom feeds
     python scripts/auto_ingest.py --feeds nature_microbiome mbio biorxiv_microbiology
@@ -34,7 +34,6 @@ def run_auto_ingest(
     feed_names: list[str] | None = None,
     max_papers: int | None = None,
     run_pipeline: bool = False,
-    sync_neo4j: bool = False,
     delay: float = 1.5,
 ) -> dict:
     """
@@ -44,7 +43,6 @@ def run_auto_ingest(
         feed_names: Specific feeds to check (None = all configured)
         max_papers: Max papers to process
         run_pipeline: Run full ingestion pipeline after download
-        sync_neo4j: Sync to Neo4j (implies run_pipeline)
         delay: Delay between downloads
 
     Returns:
@@ -88,14 +86,13 @@ def run_auto_ingest(
 
     # Run pipeline if requested
     pipeline_stats = {}
-    if (run_pipeline or sync_neo4j) and download_stats["downloaded"] > 0:
+    if run_pipeline and download_stats["downloaded"] > 0:
         logger.info("Phase 3: Running ingestion pipeline...")
         from scripts.ingest_pipeline import run_pipeline as run_ingest
 
         pipeline_stats = run_ingest(
             input_dir=settings.ingestion.raw_pdf_dir,
             output_dir=settings.ingestion.processed_dir,
-            sync_neo4j=sync_neo4j,
         )
 
     # Tracker stats
@@ -136,11 +133,6 @@ def main():
         help="Run full ingestion pipeline after download",
     )
     parser.add_argument(
-        "--sync-neo4j",
-        action="store_true",
-        help="Sync to Neo4j (implies --run-pipeline)",
-    )
-    parser.add_argument(
         "--delay",
         type=float,
         default=1.5,
@@ -166,7 +158,6 @@ def main():
         feed_names=args.feeds,
         max_papers=args.max_papers,
         run_pipeline=args.run_pipeline,
-        sync_neo4j=args.sync_neo4j,
         delay=args.delay,
     )
 

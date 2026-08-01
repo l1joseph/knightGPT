@@ -10,7 +10,7 @@
 #SBATCH --error=logs/weekly_ingest_%j.err
 
 # KnightGPT Weekly Auto-Ingestion
-# Discovers papers from RSS feeds, downloads PDFs, runs pipeline, syncs Neo4j
+# Discovers papers from RSS feeds, downloads PDFs, runs pipeline (Postgres-backed graph)
 # Schedule via crontab: 0 0 * * 0 sbatch ~/knightGPT/slurm/weekly_ingest.slurm
 
 mkdir -p logs
@@ -74,7 +74,6 @@ conda activate knightGPT
 
 python scripts/auto_ingest.py \
     --run-pipeline \
-    --sync-neo4j \
     --max-papers 50 \
     --delay 2.0 \
     --log-level INFO

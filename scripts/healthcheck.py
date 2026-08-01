@@ -105,27 +105,6 @@ class HealthChecker:
 
         return result
 
-    def check_neo4j(self) -> Dict:
-        """Check Neo4j connection (optional)."""
-        try:
-            from neo4j import GraphDatabase
-
-            driver = GraphDatabase.driver(
-                settings.neo4j.uri,
-                auth=(settings.neo4j.user, settings.neo4j.password),
-            )
-
-            with driver.session() as session:
-                result = session.run("RETURN 1 as test")
-                result.single()
-
-            driver.close()
-            return {"status": "healthy", "uri": settings.neo4j.uri}
-        except ImportError:
-            return {"status": "not_configured", "message": "neo4j package not installed"}
-        except Exception as e:
-            return {"status": "unhealthy", "error": str(e), "uri": settings.neo4j.uri}
-
     def run_all_checks(self) -> Dict:
         """Run all health checks."""
         console.print("[bold blue]Running Health Checks...[/bold blue]\n")
@@ -136,7 +115,6 @@ class HealthChecker:
             "embedding_server": self.check_embedding_server(),
             "inference_server": self.check_inference_server(),
             "data_files": self.check_data_files(),
-            "neo4j": self.check_neo4j(),
         }
 
         self.results = results
@@ -174,12 +152,6 @@ class HealthChecker:
         data_status = "✅ Available" if chunks_exists and graph_exists else "⚠️ Partial" if chunks_exists or graph_exists else "❌ Missing"
         data_details = f"Chunks: {'✓' if chunks_exists else '✗'}, Graph: {'✓' if graph_exists else '✗'}"
         table.add_row("Data Files", data_status, data_details)
-
-        # Neo4j
-        neo4j_status = self.results["neo4j"]["status"]
-        neo4j_emoji = "✅" if neo4j_status == "healthy" else "⚪" if neo4j_status == "not_configured" else "❌"
-        neo4j_details = self.results["neo4j"].get("uri", "N/A")
-        table.add_row("Neo4j", f"{neo4j_emoji} {neo4j_status}", neo4j_details)
 
         console.print(table)
 
