@@ -836,6 +836,30 @@ def test_retrieve_callable_from_inside_a_running_event_loop():
 
     result = asyncio.run(call_from_within_a_running_loop())
     assert result.chunks == []
+
+
+@pytest.mark.unit
+def test_pool_created_exactly_once_across_multiple_retrieve_calls():
+    """Regression test for the eager-init fix: create_pool() must be called
+    exactly once (at construction), never again per-call, even across
+    multiple retrieve() calls."""
+    from src.retrieval.postgres_retriever import PostgresRetriever
+
+    pool, conn = make_mock_pool([[], [], []])
+    embedder = MagicMock()
+    embedder.embed_text.return_value = [0.1] * 3584
+
+    with patch(
+        "src.retrieval.postgres_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ) as mock_create_pool:
+        retriever = PostgresRetriever(dsn="postgresql://test", embedder=embedder)
+        retriever.retrieve("q1", expand_context=False)
+        retriever.retrieve("q2", expand_context=False)
+        retriever.retrieve("q3", expand_context=False)
+        retriever.close()
+
+    assert mock_create_pool.call_count == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -908,10 +932,21 @@ class PostgresRetriever(BaseRetriever):
         self.top_k = top_k
         self.graph_hops = graph_hops
 
-        self._pool: Optional[asyncpg.Pool] = None
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._loop_thread.start()
+
+        # Create the pool eagerly and synchronously, before any retrieve()
+        # call can race on it. A lazy check-then-act init here
+        # (`if self._pool is None: self._pool = await asyncpg.create_pool(...)`)
+        # has an unguarded race: create_pool() yields control while
+        # establishing connections, so two concurrent first-callers could
+        # both see no pool yet and both create one — the loser's pool is
+        # never closed and its connections leak for the life of the
+        # process. Eager creation in __init__ removes the race by
+        # construction instead of adding lock machinery, and fails fast if
+        # Postgres is unreachable rather than failing lazily on first use.
+        self._pool: asyncpg.Pool = self._run(self._create_pool())
 
     def _run(self, coro):
         """Schedule coro on the private loop and block for its result. Safe
@@ -920,14 +955,12 @@ class PostgresRetriever(BaseRetriever):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
-    async def _get_pool(self) -> asyncpg.Pool:
-        if self._pool is None:
-            self._pool = await asyncpg.create_pool(
-                dsn=self.dsn,
-                min_size=settings.postgres.pool_min_size,
-                max_size=settings.postgres.pool_max_size,
-            )
-        return self._pool
+    async def _create_pool(self) -> asyncpg.Pool:
+        return await asyncpg.create_pool(
+            dsn=self.dsn,
+            min_size=settings.postgres.pool_min_size,
+            max_size=settings.postgres.pool_max_size,
+        )
 
     def retrieve(
         self,
@@ -964,7 +997,7 @@ class PostgresRetriever(BaseRetriever):
             return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
 
         vector_literal = _embedding_to_vector_literal(query_embedding)
-        pool = await self._get_pool()
+        pool = self._pool
 
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -1051,7 +1084,7 @@ __all__ = [
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `pytest tests/test_postgres_retriever.py -v`
-Expected: PASS (3 tests)
+Expected: PASS (4 tests)
 
 - [ ] **Step 6: Commit**
 
