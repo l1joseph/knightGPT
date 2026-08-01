@@ -16,10 +16,10 @@ memory at API startup with no storage abstraction underneath
 `GraphRAGRetriever`.
 
 The user wants to scale ingestion by an open-ended, potentially large amount:
-three additional paper sources (two Google Sheets plus a third identified
-mid-design) on top of the current 117 papers. At that scale the current
-architecture doesn't degrade gracefully — it stops working (O(n²) build time,
-unbounded memory growth).
+four additional paper sources (three Google Sheets identified during design,
+plus a pasted long-read-sequencing BioProject table) on top of the current
+117 papers. At that scale the current architecture doesn't degrade
+gracefully — it stops working (O(n²) build time, unbounded memory growth).
 
 Separately, `docker-compose.yaml` already runs a Neo4j service
 (`src/storage/storage.py`'s `sync_to_neo4j()`), but it's a write-only mirror —
@@ -36,9 +36,10 @@ isn't earning its keep.
   rest of the stack (Neo4j today) is run.
 - **Neo4j:** retire entirely. Replace with pgGraph. One graph-ish system
   instead of two.
-- **Scope of this batch:** paper-level ingestion only, from all three sheets
+- **Scope of this batch:** paper-level ingestion only, from all four sources
   identified during design (see ETL section). Sample/accession-level metadata
-  (e.g. the NCBI/ENA attributes tab in the third sheet) is out of scope.
+  (e.g. the NCBI/ENA attributes tab in the third sheet, and BioProjects in
+  the fourth source with no associated publication) is out of scope.
 - **DOI resolution for sheets without a DOI column:** auto-resolve via
   OpenAlex/PMID lookup, the same pattern `scripts/populate_zotero.py` already
   uses for OpenAlex discovery.
@@ -120,7 +121,7 @@ Query-time retrieval changes correspondingly:
 - `find_similar_chunks` → one pgContext HNSW query.
 - `expand_context` (k-hop neighbor expansion) → one pgGraph traversal query.
 
-## ETL for the three paper sources → DOI lists
+## ETL for the four paper sources → DOI lists
 
 `scripts/etl_sheet_to_dois.py`, one resolver per source, all converging on the
 existing `data/paper_lists/*.txt` DOI-list format that `download_papers.py`
@@ -141,9 +142,21 @@ already consumes — no changes needed to the download/convert/chunk stages.
   `Link to paper` URLs directly encode a DOI in the path (e.g.
   `.../doi/full/10.1128/mbio.00519-19` → `10.1128/mbio.00519-19`) — extract
   via regex; OpenAlex fallback for rows without a doi-shaped URL.
+- **Long-read metagenomics BioProject table** (pasted directly, not a Drive
+  sheet — 72 rows of ONT/PacBio-sequenced BioProjects): the cleanest of the
+  four sources. 50 of 72 rows have a `Link` that's already a bare
+  `doi.org/<doi>` URL — the DOI is the literal path suffix, no extraction
+  logic needed. 2 more rows (bioRxiv/medRxiv preprints not yet mirrored to
+  `doi.org`) need the same URL-path DOI-regex extraction as source 3. The
+  remaining 20 rows are explicitly flagged in the `Citation` column as
+  `no publication` or a non-scholarly vendor blog post — these have no paper
+  text to ingest and are skipped (not treated as ETL failures; the source
+  data itself says there's nothing to fetch).
 
 Rows that fail DOI resolution are logged to `etl_failures.csv` for manual
-follow-up rather than silently dropped or blocking the batch.
+follow-up rather than silently dropped or blocking the batch. Rows explicitly
+marked as having no publication (source 4) are logged separately as skipped,
+not failed.
 
 ## Migrating the existing 117 papers
 
@@ -187,9 +200,9 @@ wouldn't work at all under the current design.
 
 ## Testing
 
-- Unit tests for each sheet resolver (`tests/test_etl.py`) using mocked sheet
-  rows → expected DOI list, covering the direct-DOI, PMID-resolution, and
-  URL-regex-extraction paths independently.
+- Unit tests for each source resolver (`tests/test_etl.py`) using mocked
+  rows → expected DOI list, covering the direct-DOI, PMID-resolution,
+  URL-regex-extraction, and no-publication-skip paths independently.
 - Integration test standing up Postgres+pgGraph+pgContext (docker-compose
   test profile), verifying the round trip: insert chunk → pgContext HNSW
   query → pgGraph traversal query. This also gives a home for logic currently
@@ -200,9 +213,10 @@ wouldn't work at all under the current design.
 
 ## Out of scope for this design
 
-- Ingesting the sample/accession-level metadata from any of the three
-  sheets (BioSample/BioProject attributes, per-sample SRA data) — paper-level
-  only, per the scoping decision above.
+- Ingesting the sample/accession-level metadata from any of the four
+  sources (BioSample/BioProject attributes, per-sample SRA data, BioProjects
+  with no associated publication) — paper-level only, per the scoping
+  decision above.
 - Managed Polygres hosting.
 - Changes to the vLLM embedding/inference SLURM pipeline itself — this design
   only touches storage and retrieval, not the embedding/generation path.
