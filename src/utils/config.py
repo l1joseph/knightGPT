@@ -76,6 +76,29 @@ class Neo4jSettings(BaseSettings):
     )
 
 
+class PostgresSettings(BaseSettings):
+    """Postgres (pgGraph + pgContext) database configuration."""
+
+    dsn: str = Field(
+        default="postgresql://postgres:password@localhost:5432/knightgpt",
+        description="Postgres connection string (asyncpg format)",
+    )
+    pool_min_size: int = Field(
+        default=2,
+        description="Minimum connections in the asyncpg pool",
+    )
+    pool_max_size: int = Field(
+        default=10,
+        description="Maximum connections in the asyncpg pool",
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="POSTGRES_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+
 class GraphSettings(BaseSettings):
     """Knowledge graph configuration."""
 
@@ -216,6 +239,7 @@ class Settings(BaseSettings):
 
     vllm: VLLMSettings = Field(default_factory=VLLMSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
+    postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     graph: GraphSettings = Field(default_factory=GraphSettings)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
