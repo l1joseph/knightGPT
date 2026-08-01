@@ -30,6 +30,7 @@ dependencies:
       - aiohttp>=3.9.0
       - tenacity>=8.2.3
       - python-dotenv>=1.0.0
+      - asyncpg>=0.29.0
 
       # OpenAI-compatible clients
       - openai>=1.12.0
