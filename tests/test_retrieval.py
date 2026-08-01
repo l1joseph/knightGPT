@@ -80,3 +80,22 @@ class TestRAGEngine:
         assert engine.system_prompt is not None
         assert "microbiome" in engine.system_prompt.lower()
 
+
+@pytest.mark.unit
+def test_base_retriever_is_abstract():
+    """BaseRetriever cannot be instantiated directly."""
+    from src.retrieval.base import BaseRetriever
+
+    with pytest.raises(TypeError):
+        BaseRetriever()
+
+
+@pytest.mark.unit
+def test_graph_rag_retriever_is_base_retriever():
+    """GraphRAGRetriever must implement the BaseRetriever interface."""
+    from src.retrieval.base import BaseRetriever
+    from src.retrieval import GraphRAGRetriever
+
+    retriever = GraphRAGRetriever(chunks=[])
+    assert isinstance(retriever, BaseRetriever)
+

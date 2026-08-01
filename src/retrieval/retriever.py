@@ -1,6 +1,5 @@
-"""Graph-based RAG retriever with vLLM inference."""
+"""Graph-based RAG retriever with vLLM inference (file-backed)."""
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
@@ -10,41 +9,13 @@ from ..chunking import Chunk, load_chunks
 from ..embedding import VLLMEmbedder
 from ..graph import KnowledgeGraphBuilder
 from ..utils import get_logger, get_settings
+from .base import BaseRetriever, RAGResponse, RetrievalResult
 
 logger = get_logger(__name__)
 settings = get_settings()
 
 
-@dataclass
-class RetrievalResult:
-    """Result from retrieval."""
-
-    chunks: list[Chunk]
-    query_embedding: list[float]
-    similarity_scores: list[float]
-
-
-@dataclass
-class Citation:
-    """Citation information."""
-
-    chunk_id: str
-    source_file: str
-    section: Optional[str]
-    text_snippet: str
-    similarity: float
-
-
-@dataclass
-class RAGResponse:
-    """Complete RAG response."""
-
-    answer: str
-    citations: list[Citation]
-    context_chunks: list[Chunk]
-
-
-class GraphRAGRetriever:
+class GraphRAGRetriever(BaseRetriever):
     """
     Graph-enhanced RAG retriever.
     
@@ -189,71 +160,6 @@ class GraphRAGRetriever:
             similarity_scores=similarity_scores,
         )
 
-    def format_context(
-        self,
-        chunks: list[Chunk],
-        max_tokens: int = 4000,
-    ) -> str:
-        """
-        Format chunks as context string.
-        
-        Args:
-            chunks: Retrieved chunks
-            max_tokens: Maximum context tokens
-            
-        Returns:
-            Formatted context string
-        """
-        context_parts = []
-        total_tokens = 0
-        
-        for i, chunk in enumerate(chunks):
-            # Simple token estimate
-            chunk_tokens = chunk.token_count or len(chunk.text) // 4
-            
-            if total_tokens + chunk_tokens > max_tokens:
-                break
-            
-            source = Path(chunk.source_file).stem if chunk.source_file else "Unknown"
-            section = chunk.section or "General"
-            
-            context_parts.append(
-                f"[Source: {source}, Section: {section}]\n{chunk.text}"
-            )
-            total_tokens += chunk_tokens
-        
-        return "\n\n---\n\n".join(context_parts)
-
-    def create_citations(
-        self,
-        chunks: list[Chunk],
-        scores: list[float],
-    ) -> list[Citation]:
-        """Create citation objects from chunks."""
-        citations = []
-        
-        # Ensure matching lengths
-        min_len = min(len(chunks), len(scores))
-        chunks = chunks[:min_len]
-        scores = scores[:min_len]
-        
-        for chunk, score in zip(chunks, scores):
-            if not chunk:
-                continue
-            try:
-                citations.append(Citation(
-                    chunk_id=chunk.id or "unknown",
-                    source_file=chunk.source_file or "unknown",
-                    section=chunk.section,
-                    text_snippet=chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text if chunk.text else "",
-                    similarity=float(score) if score is not None else 0.0,
-                ))
-            except Exception as e:
-                logger.warning(f"Failed to create citation: {e}")
-                continue
-        
-        return citations
-
 
 class RAGEngine:
     """
@@ -264,7 +170,7 @@ class RAGEngine:
 
     def __init__(
         self,
-        retriever: GraphRAGRetriever,
+        retriever: BaseRetriever,
         inference_url: Optional[str] = None,
         inference_model: Optional[str] = None,
         api_key: str = "EMPTY",
@@ -272,9 +178,9 @@ class RAGEngine:
     ):
         """
         Initialize RAG engine.
-        
+
         Args:
-            retriever: GraphRAGRetriever instance
+            retriever: BaseRetriever instance
             inference_url: vLLM inference server URL
             inference_model: Model name for generation
             api_key: API key
