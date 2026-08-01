@@ -19,9 +19,35 @@ from src.utils import get_logger, get_settings, setup_logging
 logger = get_logger(__name__)
 settings = get_settings()
 
+REPO_ROOT = Path(__file__).parent.parent
+DEFAULT_PAPER_LISTS_DIR = REPO_ROOT / "data" / "paper_lists"
+
 
 def _embedding_to_vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(repr(x) for x in embedding) + "]"
+
+
+def _build_doi_lookup(paper_lists_dir: Path) -> dict[str, str]:
+    """Map sanitized-filename-safe DOI (as produced by download_papers.py's
+    safe_name transform) back to the real DOI, using the checked-in DOI
+    list files as the source of truth."""
+    from scripts.download_papers import parse_doi_file
+
+    lookup = {}
+    for doi_file in paper_lists_dir.glob("*.txt"):
+        for doi in parse_doi_file(doi_file):
+            safe_name = doi.replace("/", "_").replace(".", "-")
+            lookup[safe_name] = doi
+    return lookup
+
+
+def _resolve_doi(source_file: str, doi_lookup: dict[str, str]) -> str:
+    """Best-effort DOI resolution from a chunk's source_file. Falls back to
+    the raw source_file (previous behavior) if no match is found — e.g. for
+    papers ingested by a path that didn't go through the DOI-list-driven
+    download flow."""
+    stem = Path(source_file).stem if source_file else ""
+    return doi_lookup.get(stem, source_file)
 
 
 async def migrate(
@@ -29,6 +55,7 @@ async def migrate(
     chunks_path: Path,
     graph_path: Path,
     dry_run: bool = False,
+    paper_lists_dir: Path = DEFAULT_PAPER_LISTS_DIR,
 ) -> dict:
     """Migrate chunks_with_emb.json + graph.graphml into Postgres.
 
@@ -37,6 +64,12 @@ async def migrate(
         chunks_path: path to chunks_with_emb.json
         graph_path: path to graph.graphml
         dry_run: if True, only count what would be migrated, write nothing
+        paper_lists_dir: directory of checked-in DOI list files (*.txt),
+            used to resolve each chunk's source_file (a markdown path
+            derived from download_papers.py's sanitized filename) back to
+            the real DOI that papers.doi / chunks.paper_doi must use, so
+            migrated rows key against the same DOI the live DOI-based
+            ingestion path (src/graph/postgres_builder.py) would use.
 
     Returns:
         Stats dict with chunks_migrated, edges_migrated, papers_migrated
@@ -44,10 +77,15 @@ async def migrate(
     chunks = load_chunks(chunks_path)
     graph = nx.read_graphml(str(graph_path)) if graph_path.exists() else nx.Graph()
 
-    papers_seen = set()
+    doi_lookup = _build_doi_lookup(paper_lists_dir)
+
+    # doi -> a representative source_file, kept only so we have something to
+    # derive a fallback title from when inserting the papers row.
+    papers_seen: dict[str, str] = {}
     for chunk in chunks:
         if chunk.source_file:
-            papers_seen.add(chunk.source_file)
+            doi = _resolve_doi(chunk.source_file, doi_lookup)
+            papers_seen.setdefault(doi, chunk.source_file)
 
     edges = [
         (u, v, float(graph[u][v].get("similarity", 0.5))) for u, v in graph.edges()
@@ -63,14 +101,14 @@ async def migrate(
 
     conn = await asyncpg.connect(dsn)
     try:
-        for source_file in papers_seen:
+        for doi, source_file in papers_seen.items():
             await conn.execute(
                 """
                 INSERT INTO papers (doi, title, metadata)
                 VALUES ($1, $2, '{}'::jsonb)
                 ON CONFLICT (doi) DO NOTHING
                 """,
-                source_file,
+                doi,
                 Path(source_file).stem,
             )
 
@@ -79,6 +117,11 @@ async def migrate(
             if not chunk.embedding:
                 logger.warning(f"Chunk {chunk.id} has no embedding, skipping")
                 continue
+            paper_doi = (
+                _resolve_doi(chunk.source_file, doi_lookup)
+                if chunk.source_file
+                else None
+            )
             await conn.execute(
                 """
                 INSERT INTO chunks (id, paper_doi, text, embedding, section, token_count)
@@ -86,7 +129,7 @@ async def migrate(
                 ON CONFLICT (id) DO NOTHING
                 """,
                 chunk.id,
-                chunk.source_file or None,
+                paper_doi,
                 chunk.text,
                 _embedding_to_vector_literal(chunk.embedding),
                 chunk.section,
