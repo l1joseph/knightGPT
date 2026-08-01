@@ -29,19 +29,31 @@ CREATE TABLE IF NOT EXISTS chunk_edges (
 );
 
 -- pgGraph registration: chunks as nodes, chunk_edges as an edge-table relationship.
--- These calls are idempotent registration metadata writes; safe to re-run.
-SELECT graph.add_table(
-    table_name := 'public.chunks'::regclass,
-    id_column := 'id',
-    columns := ARRAY['text', 'section']
-);
+-- Idempotency is not assumed from pgGraph itself; each registration is wrapped
+-- in its own DO block that swallows re-registration errors, so re-running this
+-- file against an already-provisioned database is always safe.
+DO $$
+BEGIN
+  PERFORM graph.add_table(
+      table_name := 'public.chunks'::regclass,
+      id_column := 'id',
+      columns := ARRAY['text', 'section']
+  );
+EXCEPTION WHEN OTHERS THEN
+  NULL; -- already registered; safe to ignore on re-run
+END $$;
 
-SELECT graph.add_edge(
-    from_table := 'public.chunk_edges'::regclass,
-    from_column := 'src_chunk_id',
-    to_table := 'public.chunks'::regclass,
-    to_column := 'dst_chunk_id',
-    label := 'similar_to',
-    bidirectional := true,
-    weight_column := 'similarity'
-);
+DO $$
+BEGIN
+  PERFORM graph.add_edge(
+      from_table := 'public.chunk_edges'::regclass,
+      from_column := 'src_chunk_id',
+      to_table := 'public.chunks'::regclass,
+      to_column := 'dst_chunk_id',
+      label := 'similar_to',
+      bidirectional := true,
+      weight_column := 'similarity'
+  );
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;

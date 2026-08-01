@@ -3,6 +3,7 @@
 (see docker/postgres/Dockerfile) reachable at TEST_POSTGRES_DSN or the
 default settings.postgres.dsn."""
 
+import asyncio
 import os
 
 import asyncpg
@@ -21,7 +22,7 @@ async def test_apply_schema_creates_tables_and_extensions():
     """apply_schema should create papers/chunks/chunk_edges and load extensions."""
     try:
         conn = await asyncpg.connect(DSN)
-    except (OSError, asyncpg.PostgresError):
+    except (OSError, asyncpg.PostgresError, asyncio.TimeoutError):
         pytest.skip("No live Postgres available at TEST_POSTGRES_DSN")
 
     try:
