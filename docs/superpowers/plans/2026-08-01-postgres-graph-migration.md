@@ -717,22 +717,26 @@ git commit -m "refactor(retrieval): extract BaseRetriever interface from GraphRA
 
 ### Task 5: `PostgresRetriever`
 
+**Design constraint — read before implementing:** `BaseRetriever.retrieve()` (Task 4) is a plain **synchronous** method, and every existing caller relies on that: `src/api/main.py`'s `/api/v1/search` endpoint, `src/agents/orchestrator.py:205` (`AgentOrchestrator.run()`, a sync method), and `RAGEngine.query()`/`query_async()`/`query_stream()` all call `.retrieve(...)` synchronously — none of them are touched by this task or this plan otherwise, so `.retrieve()`'s synchronous contract cannot change. But `asyncpg` is async-only, and several of those call sites run *inside FastAPI's already-running event loop* (the search endpoint is `async def`) — `asyncio.run()`/`get_event_loop().run_until_complete()` both raise `RuntimeError: This event loop is already running` in that situation. `PostgresRetriever` resolves this by owning a private background thread with its own persistent event loop and its own `asyncpg` pool (asyncpg pools are bound to the loop that created them, so the pool must be created on that same private loop, not passed in from `main.py`'s lifespan, which runs on FastAPI's main loop). `retrieve()` schedules the real async work onto that private loop via `asyncio.run_coroutine_threadsafe()` and blocks on the result — safe to call from any thread or event loop, including FastAPI's.
+
 **Files:**
 - Create: `src/retrieval/postgres_retriever.py`
 - Modify: `src/retrieval/__init__.py`
-- Test: `tests/test_postgres_retriever.py` (new file, `@pytest.mark.unit`, mocked asyncpg pool)
+- Test: `tests/test_postgres_retriever.py` (new file, `@pytest.mark.unit`, `asyncpg.create_pool` patched)
 
 **Interfaces:**
-- Consumes: `BaseRetriever`, `RetrievalResult`, `Citation` (Task 4); `asyncpg.Pool` (Task 3's schema); `VLLMEmbedder.embed_text` (existing, `src/embedding/embedder.py:87`).
-- Produces: `PostgresRetriever(pool: asyncpg.Pool, embedder: Optional[VLLMEmbedder] = None, top_k: int = 5, graph_hops: int = 1)` — consumed by Task 7's `main.py` wiring.
+- Consumes: `BaseRetriever`, `RetrievalResult` (Task 4); `VLLMEmbedder.embed_text` (existing, `src/embedding/embedder.py:87`); `settings.postgres.dsn`/`pool_min_size`/`pool_max_size` (Task 2).
+- Produces: `PostgresRetriever(dsn: Optional[str] = None, embedder: Optional[VLLMEmbedder] = None, top_k: int = 5, graph_hops: int = 1)` with a synchronous `retrieve()` and a synchronous `close()` — consumed by Task 7's `main.py` wiring (constructed with no `dsn` arg there, so it reads `settings.postgres.dsn`; `close()` called from the lifespan shutdown).
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_postgres_retriever.py
-"""Unit tests for PostgresRetriever, using a mocked asyncpg pool."""
+"""Unit tests for PostgresRetriever. asyncpg.create_pool is patched so these
+run without a live Postgres; the retriever's real background thread and
+event loop run for real, only the asyncpg calls themselves are mocked."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -750,12 +754,12 @@ def make_mock_pool(fetch_side_effects):
 
     pool = MagicMock()
     pool.acquire.return_value = acquire_cm
+    pool.close = AsyncMock()
     return pool, conn
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_retrieve_returns_nearest_chunks_from_hnsw_query():
+def test_retrieve_returns_nearest_chunks_from_hnsw_query():
     """retrieve() should embed the query, run one HNSW query, and return chunks."""
     from src.retrieval.postgres_retriever import PostgresRetriever
 
@@ -777,14 +781,14 @@ async def test_retrieve_returns_nearest_chunks_from_hnsw_query():
             "similarity": 0.81,
         },
     ]
-    # First fetch: HNSW nearest-neighbor query. Second fetch: graph.expand() with no rows (hops disabled below).
     pool, conn = make_mock_pool([hnsw_rows])
-
     embedder = MagicMock()
     embedder.embed_text.return_value = [0.1] * 3584
 
-    retriever = PostgresRetriever(pool=pool, embedder=embedder, top_k=2, graph_hops=0)
-    result = retriever.retrieve("what is the microbiome", expand_context=False)
+    with patch("src.retrieval.postgres_retriever.asyncpg.create_pool", new=AsyncMock(return_value=pool)):
+        retriever = PostgresRetriever(dsn="postgresql://test", embedder=embedder, top_k=2, graph_hops=0)
+        result = retriever.retrieve("what is the microbiome", expand_context=False)
+        retriever.close()
 
     assert [c.id for c in result.chunks] == ["c1", "c2"]
     assert result.similarity_scores == [0.95, 0.81]
@@ -792,19 +796,46 @@ async def test_retrieve_returns_nearest_chunks_from_hnsw_query():
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
-async def test_retrieve_empty_query_returns_empty_result():
+def test_retrieve_empty_query_returns_empty_result():
     """Empty query should short-circuit without touching the pool."""
     from src.retrieval.postgres_retriever import PostgresRetriever
 
     pool, conn = make_mock_pool([])
     embedder = MagicMock()
 
-    retriever = PostgresRetriever(pool=pool, embedder=embedder)
-    result = retriever.retrieve("   ")
+    with patch("src.retrieval.postgres_retriever.asyncpg.create_pool", new=AsyncMock(return_value=pool)):
+        retriever = PostgresRetriever(dsn="postgresql://test", embedder=embedder)
+        result = retriever.retrieve("   ")
+        retriever.close()
 
     assert result.chunks == []
     conn.fetch.assert_not_called()
+
+
+@pytest.mark.unit
+def test_retrieve_callable_from_inside_a_running_event_loop():
+    """The real bug this design fixes: retrieve() must work when called
+    synchronously from code that is itself already inside a running event
+    loop (e.g. a FastAPI async def endpoint calling .retrieve() without
+    await, matching src/api/main.py's /api/v1/search and
+    src/agents/orchestrator.py's usage)."""
+    import asyncio
+
+    from src.retrieval.postgres_retriever import PostgresRetriever
+
+    pool, conn = make_mock_pool([[]])
+    embedder = MagicMock()
+    embedder.embed_text.return_value = [0.1] * 3584
+
+    async def call_from_within_a_running_loop():
+        with patch("src.retrieval.postgres_retriever.asyncpg.create_pool", new=AsyncMock(return_value=pool)):
+            retriever = PostgresRetriever(dsn="postgresql://test", embedder=embedder)
+            result = retriever.retrieve("query", expand_context=False)
+            retriever.close()
+            return result
+
+    result = asyncio.run(call_from_within_a_running_loop())
+    assert result.chunks == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -815,19 +846,30 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'src.retrieval.postgre
 - [ ] **Step 3: Implement `PostgresRetriever`**
 
 ```python
-"""Postgres-backed (pgContext + pgGraph) RAG retriever."""
+"""Postgres-backed (pgContext + pgGraph) RAG retriever.
+
+Owns a private background thread and event loop so its synchronous
+retrieve() can be called safely from anywhere — including from inside an
+already-running event loop (FastAPI request handlers) — without the
+"event loop is already running" failure asyncio.run()/run_until_complete()
+would hit there. asyncpg pools are bound to the loop that created them, so
+the pool is created lazily on that same private loop, never on the
+caller's loop.
+"""
 
 import asyncio
+import threading
 from typing import Optional
 
 import asyncpg
 
 from ..chunking import Chunk
 from ..embedding import VLLMEmbedder
-from ..utils import get_logger
+from ..utils import get_logger, get_settings
 from .base import BaseRetriever, RetrievalResult
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 
 def _embedding_to_vector_literal(embedding: list[float]) -> str:
@@ -856,15 +898,36 @@ class PostgresRetriever(BaseRetriever):
 
     def __init__(
         self,
-        pool: asyncpg.Pool,
+        dsn: Optional[str] = None,
         embedder: Optional[VLLMEmbedder] = None,
         top_k: int = 5,
         graph_hops: int = 1,
     ):
-        self.pool = pool
+        self.dsn = dsn or settings.postgres.dsn
         self.embedder = embedder or VLLMEmbedder()
         self.top_k = top_k
         self.graph_hops = graph_hops
+
+        self._pool: Optional[asyncpg.Pool] = None
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._loop_thread.start()
+
+    def _run(self, coro):
+        """Schedule coro on the private loop and block for its result. Safe
+        to call from any thread, including one already running its own
+        event loop."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
+
+    async def _get_pool(self) -> asyncpg.Pool:
+        if self._pool is None:
+            self._pool = await asyncpg.create_pool(
+                dsn=self.dsn,
+                min_size=settings.postgres.pool_min_size,
+                max_size=settings.postgres.pool_max_size,
+            )
+        return self._pool
 
     def retrieve(
         self,
@@ -872,9 +935,15 @@ class PostgresRetriever(BaseRetriever):
         top_k: Optional[int] = None,
         expand_context: bool = True,
     ) -> RetrievalResult:
-        return asyncio.get_event_loop().run_until_complete(
-            self._retrieve_async(query, top_k, expand_context)
-        )
+        return self._run(self._retrieve_async(query, top_k, expand_context))
+
+    def close(self) -> None:
+        """Close the pool and stop the private event loop. Call once, at
+        shutdown."""
+        if self._pool is not None:
+            self._run(self._pool.close())
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop_thread.join(timeout=5)
 
     async def _retrieve_async(
         self,
@@ -895,8 +964,9 @@ class PostgresRetriever(BaseRetriever):
             return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
 
         vector_literal = _embedding_to_vector_literal(query_embedding)
+        pool = await self._get_pool()
 
-        async with self.pool.acquire() as conn:
+        async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
                 SELECT id, paper_doi, text, section, token_count,
@@ -981,7 +1051,7 @@ __all__ = [
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `pytest tests/test_postgres_retriever.py -v`
-Expected: PASS (2 tests)
+Expected: PASS (3 tests)
 
 - [ ] **Step 6: Commit**
 
@@ -1250,6 +1320,7 @@ git commit -m "feat(graph): add Postgres ANN-based incremental edge building"
 
 **Files:**
 - Modify: `scripts/ingest_pipeline.py:1-112` (Step 4 uses `insert_chunks` instead of `build_graph_from_chunks`; Step 5 Neo4j sync removed)
+- Modify: `scripts/download_papers.py:264-272` (its only other caller — update the `run_pipeline()` call site so it no longer passes the `sync_neo4j` kwarg this task removes from the signature; leave the `--sync-neo4j` CLI flag itself in place as inert until Task 9 removes it)
 - Modify: `src/api/main.py:1-56` (lifespan), `:287-368` (`/api/v1/ingest`)
 - Test: `tests/test_ingest_pipeline.py` (new file, `@pytest.mark.unit`)
 
@@ -1416,11 +1487,20 @@ def run_pipeline(
                 c.source_file: {"doi": c.source_file, "title": c.metadata.get("title", ""), "metadata": c.metadata}
                 for c in all_chunks
             }
-            pool = asyncio.run(get_pg_pool())
-            insert_stats = asyncio.run(
-                insert_chunks(pool, all_chunks, papers, similarity_threshold=similarity_threshold)
-            )
-            asyncio.run(pool.close())
+
+            async def _do_insert():
+                # asyncpg pools are bound to the loop that created them, so
+                # create and use the pool inside the same asyncio.run() call
+                # rather than across separate ones.
+                pool = await get_pg_pool()
+                try:
+                    return await insert_chunks(
+                        pool, all_chunks, papers, similarity_threshold=similarity_threshold
+                    )
+                finally:
+                    await pool.close()
+
+            insert_stats = asyncio.run(_do_insert())
             stats["postgres_insert"] = insert_stats
         except Exception as e:
             logger.error(f"Postgres insert failed: {e}")
@@ -1436,6 +1516,24 @@ def run_pipeline(
 Add `import asyncio` to the top of `scripts/ingest_pipeline.py` (alongside the existing `import argparse` etc.), and remove the `--sync-neo4j` argparse argument and its `sync_neo4j=args.sync_neo4j` call site in `main()` (`scripts/ingest_pipeline.py:125, 141`).
 
 Note: `paper.title` isn't tracked on `Chunk.metadata` today — `SemanticChunker._create_chunk` only sets `file_name` in metadata (via `chunk_markdown_file`, `chunker.py:317-318`). Leave `title` empty here; Task 10's ETL script is what actually carries titles, and Task 8's migration script populates `papers.title` from the existing chunk metadata where present. This is a known gap, not a regression — the current file-based pipeline never populated a separate "papers" concept at all.
+
+- [ ] **Step 4b: Fix `download_papers.py`'s call site for the new `run_pipeline()` signature**
+
+`scripts/download_papers.py`'s `main()` is `run_pipeline()`'s only other caller and still passes the now-removed `sync_neo4j` kwarg — left unfixed, this step's signature change breaks it with a `TypeError` until Task 9 gets to it. Fix the call site now (Task 9 still owns removing the `--sync-neo4j` flag itself and its argparse entry):
+
+```python
+    # Optionally run full pipeline
+    if args.run_pipeline or args.sync_neo4j:
+        from scripts.ingest_pipeline import run_pipeline
+
+        logger.info("Running ingestion pipeline...")
+        pipeline_stats = run_pipeline(
+            input_dir=settings.ingestion.raw_pdf_dir,
+            output_dir=settings.ingestion.processed_dir,
+        )
+```
+
+(`scripts/download_papers.py:264-272` — same trigger condition, same `input_dir`/`output_dir` args, just drop the `sync_neo4j=args.sync_neo4j` kwarg.)
 
 - [ ] **Step 5: Update `main.py` lifespan and `/api/v1/ingest`**
 
@@ -1480,8 +1578,15 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global _pool, _retriever, _rag_engine
 
+    # _pool backs the /api/v1/ingest background task's insert_chunks() calls
+    # (always awaited from this loop). _retriever manages its own separate
+    # pool internally on a private background loop — see
+    # src/retrieval/postgres_retriever.py — because its retrieve() must stay
+    # callable synchronously from code that may already be inside a running
+    # event loop (e.g. /api/v1/search), which this loop's own pool can't
+    # support.
     _pool = await get_pg_pool()
-    _retriever = PostgresRetriever(pool=_pool)
+    _retriever = PostgresRetriever()
     _rag_engine = RAGEngine(retriever=_retriever)
     logger.info("RAG engine initialized (Postgres-backed)")
 
@@ -1490,6 +1595,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     if _pool is not None:
         await _pool.close()
+    if _retriever is not None:
+        _retriever.close()
 ```
 
 Update `get_retriever()`'s return type hint (`main.py:149-156`) from `GraphRAGRetriever` to `PostgresRetriever`.
@@ -1577,7 +1684,7 @@ Expected: PASS
 - [ ] **Step 7: Commit**
 
 ```bash
-git add scripts/ingest_pipeline.py src/api/main.py src/utils/db.py src/utils/__init__.py tests/test_ingest_pipeline.py
+git add scripts/ingest_pipeline.py scripts/download_papers.py src/api/main.py src/utils/db.py src/utils/__init__.py tests/test_ingest_pipeline.py
 git commit -m "feat(ingest): wire ingestion pipeline and API to Postgres-backed retriever"
 ```
 
@@ -1877,7 +1984,7 @@ Delete `class Neo4jSettings(BaseSettings): ...` (`src/utils/config.py:52-76`) an
 
 - [ ] **Step 3: Remove `--sync-neo4j` from `download_papers.py`**
 
-Delete the `--sync-neo4j` argparse argument (`scripts/download_papers.py:238-242`) and change:
+Task 7 already fixed the `run_pipeline()` call site (dropped the `sync_neo4j` kwarg the new signature no longer accepts) but left the CLI flag itself and its use in the trigger condition in place. Delete the `--sync-neo4j` argparse argument (`scripts/download_papers.py:238-242`) and change:
 
 ```python
     if args.run_pipeline or args.sync_neo4j:
@@ -1887,7 +1994,6 @@ Delete the `--sync-neo4j` argparse argument (`scripts/download_papers.py:238-242
         pipeline_stats = run_pipeline(
             input_dir=settings.ingestion.raw_pdf_dir,
             output_dir=settings.ingestion.processed_dir,
-            sync_neo4j=args.sync_neo4j,
         )
 ```
 
@@ -2332,3 +2438,4 @@ git commit -m "feat(etl): add DOI resolvers for the four new paper sources"
 - **Spec coverage:** every section of the approved spec has a task — Architecture (1, 9), Data model (3), Ingestion pipeline change (6, 7), ETL (10), Migration (8), Retriever refactor (4, 5, 7), Decommissioning (9), Error handling (Task 6's `insert_chunks` wraps each chunk's paper/chunk/edge inserts in `async with conn.transaction():`, matching the spec's "each paper's chunk+edge inserts run in one transaction" requirement), Testing (every task ships its own tests).
 - **Type consistency:** `Chunk.id` is `str` everywhere (confirmed in `src/chunking/chunker.py:20`, md5 hexdigest) — schema uses `id text PRIMARY KEY` throughout (Task 3), not `bigint`, matching that. `BaseRetriever.retrieve()` signature matches between `GraphRAGRetriever` (Task 4) and `PostgresRetriever` (Task 5). `insert_chunks(pool, chunks, papers, similarity_threshold, max_neighbors)` signature matches between its definition (Task 6) and both call sites (Task 7's `ingest_pipeline.py`/`main.py`, Task 8 uses its own lower-level inline logic since it migrates pre-existing edges rather than recomputing them — intentionally not calling `insert_chunks`).
 - **Placeholder scan:** no TBD/TODO markers. Task 6 Step 3 explicitly calls out and fixes its own draft SQL parameter-numbering mistake inline rather than leaving it wrong.
+- **Pre-flight fixes (found before any task was dispatched, applied directly to this file):** (1) Task 7 originally changed `run_pipeline()`'s signature without updating `scripts/download_papers.py`'s call site, its only other caller — would have crashed that script with a `TypeError` in the window between Task 7 and Task 9 completing; Task 7 now fixes that call site itself. (2) `PostgresRetriever` originally called `asyncio.get_event_loop().run_until_complete()` inside `retrieve()`, but every real caller of `.retrieve()` (`main.py`'s `/api/v1/search`, `AgentOrchestrator.run()`, `RAGEngine`) calls it synchronously from contexts that can already be inside a running event loop — that raises `RuntimeError: This event loop is already running`. Redesigned `PostgresRetriever` to own a private background thread + event loop + `asyncpg` pool, bridging via `run_coroutine_threadsafe()`, so `.retrieve()` stays a safe synchronous call from anywhere without changing any of its callers. (3) `ingest_pipeline.py`'s Postgres-insert step originally called `asyncio.run()` three separate times (pool creation, insert, pool close) — since `asyncio.run()` opens and tears down a fresh event loop each call and `asyncpg` pools are bound to the loop that created them, the pool from the first call was unusable in the second. Fixed to do all three inside one `asyncio.run()` call.
