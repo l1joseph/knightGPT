@@ -1,5 +1,6 @@
 """Storage-agnostic retriever interface for RAG."""
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,15 @@ from ..chunking import Chunk
 from ..utils import get_logger
 
 logger = get_logger(__name__)
+
+# DOIs always start with the "10." directory indicator followed by a
+# registrant code and a slash (https://www.doi.org/doi_handbook/2_Numbering.html).
+# PostgresRetriever sets Chunk.source_file to the paper's real DOI (e.g.
+# "10.1128/mbio.00519-19"); the file-backed retriever sets it to a markdown
+# path. Running a DOI through Path(...).stem mangles it badly -- Path
+# treats "/" as a separator and "." as an extension marker, so
+# Path("10.1128/mbio.00519-19").stem yields just "mbio".
+_DOI_PATTERN = re.compile(r"^10\.\d+/")
 
 
 @dataclass
@@ -68,7 +78,12 @@ class BaseRetriever(ABC):
             if total_tokens + chunk_tokens > max_tokens:
                 break
 
-            source = Path(chunk.source_file).stem if chunk.source_file else "Unknown"
+            if not chunk.source_file:
+                source = "Unknown"
+            elif _DOI_PATTERN.match(chunk.source_file):
+                source = chunk.source_file
+            else:
+                source = Path(chunk.source_file).stem
             section = chunk.section or "General"
 
             context_parts.append(
@@ -94,13 +109,19 @@ class BaseRetriever(ABC):
             if not chunk:
                 continue
             try:
-                citations.append(Citation(
-                    chunk_id=chunk.id or "unknown",
-                    source_file=chunk.source_file or "unknown",
-                    section=chunk.section,
-                    text_snippet=chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text if chunk.text else "",
-                    similarity=float(score) if score is not None else 0.0,
-                ))
+                citations.append(
+                    Citation(
+                        chunk_id=chunk.id or "unknown",
+                        source_file=chunk.source_file or "unknown",
+                        section=chunk.section,
+                        text_snippet=(
+                            chunk.text[:200] + "..."
+                            if len(chunk.text) > 200
+                            else chunk.text if chunk.text else ""
+                        ),
+                        similarity=float(score) if score is not None else 0.0,
+                    )
+                )
             except Exception as e:
                 logger.warning(f"Failed to create citation: {e}")
                 continue

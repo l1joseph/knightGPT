@@ -14,40 +14,17 @@ import asyncpg
 import networkx as nx
 
 from src.chunking import load_chunks
+from src.ingestion.doi_resolver import DEFAULT_PAPER_LISTS_DIR
+from src.ingestion.doi_resolver import build_doi_lookup as _build_doi_lookup
+from src.ingestion.doi_resolver import resolve_doi as _resolve_doi
 from src.utils import get_logger, get_settings, setup_logging
 
 logger = get_logger(__name__)
 settings = get_settings()
 
-REPO_ROOT = Path(__file__).parent.parent
-DEFAULT_PAPER_LISTS_DIR = REPO_ROOT / "data" / "paper_lists"
-
 
 def _embedding_to_vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(repr(x) for x in embedding) + "]"
-
-
-def _build_doi_lookup(paper_lists_dir: Path) -> dict[str, str]:
-    """Map sanitized-filename-safe DOI (as produced by download_papers.py's
-    safe_name transform) back to the real DOI, using the checked-in DOI
-    list files as the source of truth."""
-    from scripts.download_papers import parse_doi_file
-
-    lookup = {}
-    for doi_file in paper_lists_dir.glob("*.txt"):
-        for doi in parse_doi_file(doi_file):
-            safe_name = doi.replace("/", "_").replace(".", "-")
-            lookup[safe_name] = doi
-    return lookup
-
-
-def _resolve_doi(source_file: str, doi_lookup: dict[str, str]) -> str:
-    """Best-effort DOI resolution from a chunk's source_file. Falls back to
-    the raw source_file (previous behavior) if no match is found — e.g. for
-    papers ingested by a path that didn't go through the DOI-list-driven
-    download flow."""
-    stem = Path(source_file).stem if source_file else ""
-    return doi_lookup.get(stem, source_file)
 
 
 async def migrate(

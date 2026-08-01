@@ -32,7 +32,8 @@ services:
     networks:
       - knightgpt-net
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   # Open WebUI - Self-hosted ChatGPT-like interface
   # https://github.com/open-webui/open-webui

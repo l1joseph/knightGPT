@@ -33,6 +33,10 @@ squeue -u $USER                                  # check node assignments
 #   VLLM_INFERENCE_URL=http://<node>:8000/v1
 
 # Run API server (on login node, after vLLM servers are up)
+# NOTE: since the Postgres migration, the API requires a reachable Postgres
+# at settings.postgres.dsn (POSTGRES_DSN) at startup -- it previously
+# degraded gracefully without file-backed data, but now hard-fails without
+# Postgres (lifespan handler calls get_pg_pool() before serving requests).
 python -m src.api.main --host 0.0.0.0 --port 8080
 
 # SSH tunnel from local machine (match the login node hostname)

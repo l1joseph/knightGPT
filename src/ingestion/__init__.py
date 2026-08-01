@@ -21,6 +21,7 @@ from .pdf_to_markdown import (
 from .web_scraper import MicrobiomeScraper, ScrapedDocument, run_scheduled_scrape
 from .rss_feed import RSSFeedIngester, DiscoveredPaper, PaperTracker
 from .briefing_parser import parse_briefing_text, parse_briefing_json, ParsedBriefing
+from .doi_resolver import build_doi_lookup, resolve_doi
 
 __all__ = [
     # PDF processing
@@ -50,4 +51,7 @@ __all__ = [
     "parse_briefing_text",
     "parse_briefing_json",
     "ParsedBriefing",
+    # DOI resolution
+    "build_doi_lookup",
+    "resolve_doi",
 ]

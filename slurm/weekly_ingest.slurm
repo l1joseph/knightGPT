@@ -1,19 +1,22 @@
 #!/bin/bash
-#SBATCH --job-name=knightgpt-ingest
+#SBATCH --job-name=knightgpt-weekly-rss-ingest
 #SBATCH --partition=cluster
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=04:00:00
-#SBATCH --output=logs/weekly_ingest_%j.out
-#SBATCH --error=logs/weekly_ingest_%j.err
+#SBATCH --output=/cosmos/nfs/home/l1joseph/knightGPT/logs/%x_%j.out
+#SBATCH --error=/cosmos/nfs/home/l1joseph/knightGPT/logs/%x_%j.err
 
 # KnightGPT Weekly Auto-Ingestion
 # Discovers papers from RSS feeds, downloads PDFs, runs pipeline (Postgres-backed graph)
 # Schedule via crontab: 0 0 * * 0 sbatch ~/knightGPT/slurm/weekly_ingest.slurm
 
-mkdir -p logs
+# NOTE: /cosmos/nfs/home/l1joseph/knightGPT/logs/ (the --output/--error target
+# above) must already exist before submission -- SLURM opens those files at
+# job start, before this script body runs, so a `mkdir -p` here would be too
+# late to help.
 
 module purge
 module load rocm/6.3.0

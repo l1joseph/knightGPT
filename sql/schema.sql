@@ -30,8 +30,20 @@ CREATE TABLE IF NOT EXISTS chunk_edges (
 
 -- pgGraph registration: chunks as nodes, chunk_edges as an edge-table relationship.
 -- Idempotency is not assumed from pgGraph itself; each registration is wrapped
--- in its own DO block that swallows re-registration errors, so re-running this
--- file against an already-provisioned database is always safe.
+-- in its own DO block so re-running this file against an already-provisioned
+-- database is always safe.
+--
+-- We do NOT know pgGraph's exact duplicate-registration SQLSTATE (no live
+-- Postgres has been available to determine it during this migration), so we
+-- deliberately do not narrow the WHEN OTHERS catch here. Instead we surface
+-- every caught exception via RAISE NOTICE so a genuine failure (bad argument
+-- name, type mismatch, etc.) is visible in the Postgres logs rather than
+-- silently swallowed. scripts/apply_schema.py additionally verifies
+-- registration succeeded by querying graph.registered_tables() /
+-- graph.registered_edges() after applying this file and raises a Python
+-- exception if either registration is missing, so a swallowed failure here
+-- is caught loudly at the one point in the runbook where it's still cheap
+-- to catch.
 DO $$
 BEGIN
   PERFORM graph.add_table(
@@ -40,7 +52,7 @@ BEGIN
       columns := ARRAY['text', 'section']
   );
 EXCEPTION WHEN OTHERS THEN
-  NULL; -- already registered; safe to ignore on re-run
+  RAISE NOTICE 'graph.add_table(public.chunks) raised % (%) -- ignored, assumed already registered; verify with SELECT * FROM graph.registered_tables()', SQLERRM, SQLSTATE;
 END $$;
 
 DO $$
@@ -55,5 +67,5 @@ BEGIN
       weight_column := 'similarity'
   );
 EXCEPTION WHEN OTHERS THEN
-  NULL;
+  RAISE NOTICE 'graph.add_edge(public.chunk_edges) raised % (%) -- ignored, assumed already registered; verify with SELECT * FROM graph.registered_edges()', SQLERRM, SQLSTATE;
 END $$;

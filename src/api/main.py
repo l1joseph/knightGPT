@@ -1,23 +1,21 @@
 """FastAPI application for KnightGPT RAG API."""
 
-import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..chunking import SemanticChunker
 from ..embedding import VLLMEmbedder
 from ..graph import insert_chunks
 from ..ingestion import (
-    GoogleFormWebhook,
     batch_convert_pdfs,
     get_webhook_handler,
 )
+from ..ingestion.doi_resolver import build_doi_lookup, resolve_doi
 from ..retrieval import PostgresRetriever, RAGEngine
 from ..utils import get_logger, get_pg_pool, get_settings
 
@@ -332,9 +330,14 @@ async def ingest_documents(
             if embedder.check_health():
                 new_chunks = embedder.embed_chunks(new_chunks)
 
+            doi_lookup = build_doi_lookup()
             papers = {
                 c.source_file: {
-                    "doi": c.source_file,
+                    "doi": (
+                        resolve_doi(c.source_file, doi_lookup)
+                        if c.source_file
+                        else None
+                    ),
                     "title": "",
                     "metadata": c.metadata,
                 }

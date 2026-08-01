@@ -18,8 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils import get_logger, get_settings, setup_logging, get_pg_pool
+from src.utils import get_logger, setup_logging, get_pg_pool
 from src.ingestion import batch_convert_pdfs
+from src.ingestion.doi_resolver import build_doi_lookup, resolve_doi
 from src.chunking import SemanticChunker, save_chunks
 from src.embedding import VLLMEmbedder
 from src.graph import insert_chunks
@@ -85,9 +86,14 @@ def run_pipeline(
     if not skip_graph:
         logger.info("Step 4: Inserting chunks into Postgres")
         try:
+            doi_lookup = build_doi_lookup()
             papers = {
                 c.source_file: {
-                    "doi": c.source_file,
+                    "doi": (
+                        resolve_doi(c.source_file, doi_lookup)
+                        if c.source_file
+                        else None
+                    ),
                     "title": c.metadata.get("title", ""),
                     "metadata": c.metadata,
                 }
