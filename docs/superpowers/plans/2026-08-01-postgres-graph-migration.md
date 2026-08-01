@@ -2122,7 +2122,83 @@ Three of the four sources (MMC 2025 Data Sheet, Cancer Qiita tracker, Global Hum
 
 - [ ] **Step 1: Write the long-read BioProject fixture data file**
 
-Create `data/paper_lists/sources/longread_bioprojects.tsv` with the exact 72-row tab-separated content pasted during design (columns: `accession`, `samples`, `platform`, `citation`, `link`). This is real data, not a placeholder — copy verbatim.
+Create `data/paper_lists/sources/longread_bioprojects.tsv` with exactly this content (header + 72 tab-separated data rows). This is real data, not a placeholder or sample — write it byte-for-byte, do not abbreviate or select a subset:
+
+```tsv
+accession	samples	platform	citation	link
+PRJEB83983	83 WWTPs, 53,501 MAGs	ONT PromethION	Liu et al., bioRxiv 2026	doi.org/10.64898/2026.07.10.737647
+PRJEB58634	154	ONT PromethION	Sereika et al., Nat Microbiol 2025	doi.org/10.1038/s41564-025-02062-z
+PRJNA763692	180 (60x3 timepoints)	ONT PromethION + Illumina	Jin et al., Nat Microbiol 2023	doi.org/10.1038/s41564-022-01270-1
+PRJNA689363	24	PacBio SMRT	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA689363
+PRJDB12736	24	ONT GridION + MGI DNBSEQ	Okazaki et al., mSystems 2022	doi.org/10.1128/msystems.00433-22
+PRJNA651859	1	PacBio RS II	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA651859
+PRJEB42267	102	ONT MinION + Illumina	Varliero et al., FEMS Microbiol Ecol 2021	doi.org/10.1093/femsec/fiab127
+PRJNA1207694	55	PacBio Sequel II	Ni et al., Cell Host Microbe 2026	doi.org/10.1016/j.chom.2026.04.019
+PRJNA998863	1	ONT MinION+PromethION + Illumina	Lui & Nielsen, mSystems 2024	doi.org/10.1128/msystems.00242-24
+PRJEB89893	1, 7 runs	ONT PromethION R9 + Illumina	Bağcı et al., GigaScience 2025	doi.org/10.1093/gigascience/giaf135
+PRJNA1139951	47 initial / 210 expanded	PacBio Revio + ONT + Illumina	Minich et al., Cell 2025	doi.org/10.1016/j.cell.2025.08.020
+PRJEB29504	2 mock communities, 4 runs	ONT GridION+PromethION R9.4.1	Nicholls et al., GigaScience 2019	doi.org/10.1093/gigascience/giz043
+PRJNA1201851	66 (33x2 stations)	PacBio Revio + Illumina	Tucker et al., Sci Data 2025	doi.org/10.1038/s41597-025-06166-3
+PRJNA1126655	35	ONT	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1126655
+PRJEB81413	273	ONT GridION	Govender et al., Lancet Microbe 2026	doi.org/10.1016/j.lanmic.2025.101333
+PRJEB74343	44	ONT PromethION	Heidelbach et al., bioRxiv 2024 (preprint)	doi.org/10.1101/2024.04.29.591623
+PRJNA717332	2	PacBio Sequel	Li et al., Cell Death Dis 2021	doi.org/10.1038/s41419-021-03829-y
+PRJNA1310651	24	PacBio Revio	Bowie et al., Research Square 2025 (preprint)	doi.org/10.21203/rs.3.rs-7888495/v1
+PRJNA743701	3	PacBio RS II + Illumina + ONT	Wang et al., Front Mar Sci 2021	doi.org/10.3389/fmars.2021.754332
+PRJNA798244	1	PacBio Sequel II	Kim et al., Nat Commun 2022	doi.org/10.1038/s41467-022-34149-0
+PRJEB86780	340	ONT PromethION	no publication	ebi.ac.uk/ena/browser/view/PRJEB86780
+PRJNA1283500	8	unconfirmed	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1283500
+PRJEB56100	60	ONT MinION + Illumina	Nilgiriwala et al., J Clin Microbiol 2023	doi.org/10.1128/jcm.01578-22
+PRJNA893826	1	PacBio Sequel II	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA893826
+PRJNA1260441	20	ONT	Akpulu et al., The Microbe 2025	doi.org/10.1016/j.microb.2025.100398
+PRJNA862336	26	ONT MinION R9.4.1	Ulrich et al., mSystems 2024	doi.org/10.1128/msystems.00945-23
+PRJNA723028	1	ONT MinION + Illumina	Galata et al., Brief Bioinform 2021	doi.org/10.1093/bib/bbab330
+PRJDB17221	106	Illumina + PacBio Sequel II	Takewaki et al., Cell Rep 2024	doi.org/10.1016/j.celrep.2024.114785
+PRJNA1052403	23	PacBio SMRT	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1052403
+PRJNA1220977	1	PacBio	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1220977
+PRJNA750084	4	PacBio Sequel IIe	vendor reference dataset, PacBio (no paper)	pacb.com/blog/data-release-human-microbiome-samples-demonstrate-advances-in-hifi-enabled-metagenomic-sequencing
+PRJNA364433	1	PacBio RS II	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA364433
+PRJNA602101	12 samples / 8 subjects	PacBio RS II + Illumina	Jin et al., Gut Microbes 2022	doi.org/10.1080/19490976.2021.2021790
+PRJNA982864	10 (+2 via PRJNA1031672)	ONT MinION Flongle	Wrenn & Drown, Gigabyte 2023	doi.org/10.46471/gigabyte.103
+PRJEB66265	~5 ICU patients	Illumina + ONT MinION	no publication	ebi.ac.uk/ena/browser/view/PRJEB66265
+PRJNA798176	1 (of 3)	ONT PromethION	Ho et al., FEMS Microbiol Ecol 2024	doi.org/10.1093/femsec/fiae122
+PRJNA993431	1	ONT MinION + Illumina	Plum-Jensen et al., Syst Appl Microbiol 2024	doi.org/10.1016/j.syapm.2024.126487
+PRJNA784005	10	PacBio RS II + Illumina	Seong et al., Microbiome 2022	doi.org/10.1186/s40168-022-01340-w
+PRJEB90666	56 combos	PacBio HiFi + ONT + Illumina	Cerk et al., bioRxiv 2025 (preprint)	doi.org/10.1101/2025.08.27.672560
+PRJNA884149	1	PacBio Sequel + Illumina	Tao et al., Infect Drug Resist 2023	doi.org/10.2147/IDR.S412678
+PRJNA707653	3	ONT MinION	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA707653
+PRJEB100587	34 amplicon + 11 WGS	ONT MinION	Kujala & Kinnunen, FEMS Microbes 2026	doi.org/10.1093/femsmc/xtag018
+PRJNA1257062	20	ONT PromethION 2 Solo	Verhoeven et al., New Phytol 2025	doi.org/10.1111/nph.70450
+PRJNA754443	12 (11 long-read of 23 WGS runs)	PacBio Sequel II + Illumina	Gehrig et al., Microb Genom 2022	doi.org/10.1099/mgen.0.000794
+PRJNA1232063	6	ONT PromethION	Chakraborty et al., J Environ Chem Eng 2026	doi.org/10.1016/j.jece.2026.122738
+PRJNA444435	1 (of 4 plots)	PacBio RS II + Illumina	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA444435
+PRJNA894152	57 long-read human fecal	ONT MinION Flongle+MinION	Mills et al., Microbiome 2023	doi.org/10.1186/s40168-023-01636-5
+PRJNA749673	4	ONT GridION	Balachandran et al., Mol Genet Genomics 2023	doi.org/10.1007/s00438-023-01995-6
+PRJNA1276525	20	PacBio Sequel II	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1276525
+PRJNA1404836	42	PacBio Revio + Illumina	Shi et al., bioRxiv 2026 (preprint)	biorxiv.org/content/10.64898/2026.01.21.700959v1
+PRJNA1051280	2	ONT GridION R10.4.1	Kruasuwan et al., BMC Infect Dis 2025	doi.org/10.1186/s12879-025-11741-5
+PRJNA603756	1	PacBio Sequel	Derakhshani et al., BMC Genomics 2020	doi.org/10.1186/s12864-020-06910-6
+PRJNA1179658	4	ONT MinION	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1179658
+PRJEB22207	9	ONT MinION+Flongle	Leggett et al., Nat Microbiol 2020	doi.org/10.1038/s41564-019-0626-z
+PRJNA799199	15	ONT GridION	Marquet et al., Sci Rep 2022	doi.org/10.1038/s41598-022-08003-8
+PRJNA1225188	63	ONT GridION	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1225188
+PRJNA466717	8 WGS of 257 total	Illumina + PacBio RS II + ONT	Vasileiadis et al., Environ Microbiol 2022	doi.org/10.1111/1462-2920.16116
+PRJNA774819	113 (2 true WGS)	PacBio Sequel II	Ma et al., mBio 2022	doi.org/10.1128/mbio.01299-22
+PRJNA1050028	2	ONT MinION	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1050028
+PRJNA1076812	7	ONT MinION	Stoeck et al., Metabarcoding Metagenomics 2024	doi.org/10.3897/mbmg.8.121817
+PRJNA1090773	108 of 115	ONT GridION R9.4.1	Snell et al., J Hosp Infect 2024 — no data currently on ENA	doi.org/10.1016/j.jhin.2024.06.005
+PRJNA940499	70	unconfirmed	Maghini et al., Nat Biotechnol 2023	doi.org/10.1038/s41587-023-01754-3
+PRJNA1210843	1	PacBio Sequel II	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1210843
+PRJNA1368358	5	PacBio Revio	Mokoena et al., Appl Microbiol 2025	doi.org/10.3390/applmicrobiol6010003
+PRJNA1129190	18	ONT MinION	Khoiri et al., Rhizosphere 2025	doi.org/10.1016/j.rhisph.2025.101142
+PRJEB40239	2	ONT PromethION	Gregorova et al., eLife 2020	doi.org/10.7554/eLife.63430
+PRJEB30781	81	ONT MinION	Charalampous et al., Nat Biotechnol 2019	doi.org/10.1038/s41587-019-0156-5
+PRJEB78709	7 clinical + 5 controls	ONT GridION	Street et al., Microb Genom 2025	doi.org/10.1099/mgen.0.001507
+PRJNA1054491	17	ONT MinION R9.4.1	Yang et al., Genome Biol 2025	doi.org/10.1186/s13059-025-03729-w
+PRJNA1315483	1	PacBio Sequel IIe	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1315483
+PRJNA1343698	1	PacBio Sequel IIe	no publication	ncbi.nlm.nih.gov/bioproject/PRJNA1343698
+PRJNA1395257	176	ONT GridION	Lao et al., medRxiv 2025 (preprint)	medrxiv.org/content/10.1101/2025.06.02.25328768v1
+```
 
 - [ ] **Step 2: Write the failing tests (one per resolver)**
 
