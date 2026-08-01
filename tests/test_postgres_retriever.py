@@ -113,3 +113,33 @@ def test_retrieve_callable_from_inside_a_running_event_loop():
 
     result = asyncio.run(call_from_within_a_running_loop())
     assert result.chunks == []
+
+
+@pytest.mark.unit
+def test_pool_created_exactly_once_at_construction():
+    """Regression test: asyncpg.create_pool() must be called exactly once,
+    eagerly, during __init__ — never lazily on first retrieve() and never
+    again on subsequent retrieve() calls. This guards against a
+    check-then-act race in a lazy `if self._pool is None: create...` init,
+    where concurrent first callers could each see no pool yet and each
+    create (and leak) their own pool."""
+    from src.retrieval.postgres_retriever import PostgresRetriever
+
+    pool, conn = make_mock_pool([[], [], []])
+    embedder = MagicMock()
+    embedder.embed_text.return_value = [0.1] * 3584
+
+    mock_create_pool = AsyncMock(return_value=pool)
+    with patch(
+        "src.retrieval.postgres_retriever.asyncpg.create_pool",
+        new=mock_create_pool,
+    ):
+        retriever = PostgresRetriever(dsn="postgresql://test", embedder=embedder)
+        assert mock_create_pool.call_count == 1
+
+        retriever.retrieve("query one", expand_context=False)
+        retriever.retrieve("query two", expand_context=False)
+        retriever.retrieve("query three", expand_context=False)
+        retriever.close()
+
+    assert mock_create_pool.call_count == 1

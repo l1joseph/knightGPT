@@ -5,8 +5,10 @@ retrieve() can be called safely from anywhere — including from inside an
 already-running event loop (FastAPI request handlers) — without the
 "event loop is already running" failure asyncio.run()/run_until_complete()
 would hit there. asyncpg pools are bound to the loop that created them, so
-the pool is created lazily on that same private loop, never on the
-caller's loop.
+the pool is created eagerly, synchronously, on that same private loop
+during __init__ — never lazily and never on the caller's loop. Eager
+creation also avoids a check-then-act race where concurrent first callers
+could each see no pool yet and each create (and leak) their own.
 """
 
 import asyncio
@@ -60,10 +62,17 @@ class PostgresRetriever(BaseRetriever):
         self.top_k = top_k
         self.graph_hops = graph_hops
 
-        self._pool: Optional[asyncpg.Pool] = None
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._loop_thread.start()
+
+        # Create the pool eagerly and synchronously, before any retrieve()
+        # call can race on it — this replaces a lazy check-then-act init
+        # that had an unguarded race between concurrent callers
+        # (asyncpg.create_pool() yields control during connection setup, so
+        # two concurrent first-callers could both see no pool yet and both
+        # create one, leaking the loser).
+        self._pool: asyncpg.Pool = self._run(self._create_pool())
 
     def _run(self, coro):
         """Schedule coro on the private loop and block for its result. Safe
@@ -72,14 +81,12 @@ class PostgresRetriever(BaseRetriever):
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
-    async def _get_pool(self) -> asyncpg.Pool:
-        if self._pool is None:
-            self._pool = await asyncpg.create_pool(
-                dsn=self.dsn,
-                min_size=settings.postgres.pool_min_size,
-                max_size=settings.postgres.pool_max_size,
-            )
-        return self._pool
+    async def _create_pool(self) -> asyncpg.Pool:
+        return await asyncpg.create_pool(
+            dsn=self.dsn,
+            min_size=settings.postgres.pool_min_size,
+            max_size=settings.postgres.pool_max_size,
+        )
 
     def retrieve(
         self,
@@ -92,8 +99,7 @@ class PostgresRetriever(BaseRetriever):
     def close(self) -> None:
         """Close the pool and stop the private event loop. Call once, at
         shutdown."""
-        if self._pool is not None:
-            self._run(self._pool.close())
+        self._run(self._pool.close())
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._loop_thread.join(timeout=5)
 
@@ -116,7 +122,7 @@ class PostgresRetriever(BaseRetriever):
             return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
 
         vector_literal = _embedding_to_vector_literal(query_embedding)
-        pool = await self._get_pool()
+        pool = self._pool
 
         async with pool.acquire() as conn:
             rows = await conn.fetch(
