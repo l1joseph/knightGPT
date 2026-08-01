@@ -268,7 +268,6 @@ def main():
         pipeline_stats = run_pipeline(
             input_dir=settings.ingestion.raw_pdf_dir,
             output_dir=settings.ingestion.processed_dir,
-            sync_neo4j=args.sync_neo4j,
         )
         print("\nPipeline Summary:")
         for key, value in pipeline_stats.items():

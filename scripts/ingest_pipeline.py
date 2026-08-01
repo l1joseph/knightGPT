@@ -6,11 +6,11 @@ Processes PDFs through the complete pipeline:
 1. PDF to Markdown conversion
 2. Semantic chunking
 3. Embedding generation (via vLLM)
-4. Knowledge graph construction
-5. Optional Neo4j sync
+4. Insert chunks + ANN-based edges into Postgres
 """
 
 import argparse
+import asyncio
 import json
 import sys
 from datetime import datetime
@@ -18,11 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils import get_logger, get_settings, setup_logging
+from src.utils import get_logger, get_settings, setup_logging, get_pg_pool
 from src.ingestion import batch_convert_pdfs
 from src.chunking import SemanticChunker, save_chunks
 from src.embedding import VLLMEmbedder
-from src.graph import build_graph_from_chunks
+from src.graph import insert_chunks
 
 logger = get_logger(__name__)
 
@@ -37,39 +37,37 @@ def run_pipeline(
     force_ocr: bool = False,
     skip_embedding: bool = False,
     skip_graph: bool = False,
-    sync_neo4j: bool = False,
 ) -> dict:
-    """Run the complete ingestion pipeline."""
+    """Run the complete ingestion pipeline (Postgres-backed graph step)."""
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     stats = {
         "start_time": datetime.now().isoformat(),
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
     }
-    
+
     markdown_dir = output_dir / "markdown"
     chunks_file = output_dir / "chunks.json"
     embedded_chunks_file = output_dir / "chunks_with_emb.json"
-    graph_file = output_dir / "graph.graphml"
-    
+
     # Step 1: PDF to Markdown
     logger.info("Step 1: Converting PDFs to Markdown")
     pdf_files = list(input_dir.rglob("*.pdf"))
-    
+
     if pdf_files:
         results = batch_convert_pdfs(input_dir, markdown_dir, force_ocr=force_ocr)
         stats["pdfs_processed"] = len(results)
         stats["pdfs_successful"] = sum(1 for r in results if r.get("success"))
-    
+
     # Step 2: Chunking
     logger.info("Step 2: Semantic Chunking")
     chunker = SemanticChunker(max_tokens=max_tokens)
     all_chunks = chunker.chunk_directory(markdown_dir, chunks_file)
     stats["chunks_created"] = len(all_chunks)
-    
+
     # Step 3: Embedding
     if not skip_embedding:
         logger.info("Step 3: Generating Embeddings")
@@ -82,31 +80,44 @@ def run_pipeline(
         except Exception as e:
             logger.error(f"Embedding failed: {e}")
             stats["embedding_error"] = str(e)
-    
-    # Step 4: Graph Construction
-    if not skip_graph and embedded_chunks_file.exists():
-        logger.info("Step 4: Building Knowledge Graph")
+
+    # Step 4: Insert into Postgres (chunks + ANN-based edges)
+    if not skip_graph:
+        logger.info("Step 4: Inserting chunks into Postgres")
         try:
-            graph = build_graph_from_chunks(embedded_chunks_file, graph_file, similarity_threshold)
-            stats["graph_nodes"] = graph.number_of_nodes()
-            stats["graph_edges"] = graph.number_of_edges()
+            papers = {
+                c.source_file: {
+                    "doi": c.source_file,
+                    "title": c.metadata.get("title", ""),
+                    "metadata": c.metadata,
+                }
+                for c in all_chunks
+            }
+
+            async def _do_insert():
+                # asyncpg pools are bound to the loop that created them, so
+                # create and use the pool inside the same asyncio.run() call
+                # rather than across separate ones.
+                pool = await get_pg_pool()
+                try:
+                    return await insert_chunks(
+                        pool,
+                        all_chunks,
+                        papers,
+                        similarity_threshold=similarity_threshold,
+                    )
+                finally:
+                    await pool.close()
+
+            insert_stats = asyncio.run(_do_insert())
+            stats["postgres_insert"] = insert_stats
         except Exception as e:
-            logger.error(f"Graph construction failed: {e}")
-    
-    # Step 5: Neo4j Sync
-    if sync_neo4j:
-        logger.info("Step 5: Syncing to Neo4j")
-        try:
-            from src.storage import sync_to_neo4j
-            result = sync_to_neo4j(embedded_chunks_file, graph_file)
-            stats["neo4j_sync"] = result
-        except Exception as e:
-            logger.error(f"Neo4j sync failed: {e}")
-    
+            logger.error(f"Postgres insert failed: {e}")
+
     stats["end_time"] = datetime.now().isoformat()
     with open(output_dir / "pipeline_stats.json", "w") as f:
         json.dump(stats, f, indent=2)
-    
+
     logger.info("Pipeline Complete!")
     return stats
 
@@ -122,12 +133,11 @@ def main():
     parser.add_argument("--force-ocr", action="store_true")
     parser.add_argument("--skip-embedding", action="store_true")
     parser.add_argument("--skip-graph", action="store_true")
-    parser.add_argument("--sync-neo4j", action="store_true")
     parser.add_argument("--log-level", type=str, default="INFO")
-    
+
     args = parser.parse_args()
     setup_logging(level=args.log_level)
-    
+
     stats = run_pipeline(
         input_dir=args.input,
         output_dir=args.output,
@@ -138,9 +148,8 @@ def main():
         force_ocr=args.force_ocr,
         skip_embedding=args.skip_embedding,
         skip_graph=args.skip_graph,
-        sync_neo4j=args.sync_neo4j,
     )
-    
+
     print("\nPipeline Summary:")
     for key, value in stats.items():
         print(f"  {key}: {value}")
