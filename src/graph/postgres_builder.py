@@ -1,4 +1,6 @@
-"""Postgres ingestion: insert chunks and build similarity edges via pgContext ANN."""
+"""Postgres ingestion: insert chunk text/metadata into Postgres, embeddings
+into DuckDB, and build similarity edges via DuckDB's HNSW-accelerated
+nearest-neighbor search."""
 
 import json
 
@@ -6,33 +8,54 @@ import asyncpg
 
 from ..chunking import Chunk
 from ..utils import get_logger
+from .duckdb_store import DuckDBStore
 
 logger = get_logger(__name__)
-
-
-def _embedding_to_vector_literal(embedding: list[float]) -> str:
-    return "[" + ",".join(repr(x) for x in embedding) + "]"
 
 
 async def insert_chunks(
     pool: asyncpg.Pool,
     chunks: list[Chunk],
     papers: dict[str, dict],
+    duckdb_store: DuckDBStore,
     similarity_threshold: float = 0.7,
     max_neighbors: int = 10,
 ) -> dict:
     """
-    Insert chunks into Postgres and build similarity edges incrementally.
+    Insert chunks into Postgres (text/metadata) and DuckDB (embeddings),
+    then build similarity edges.
 
-    For each chunk: insert its paper (if new), insert the chunk row, then
-    query pgContext's HNSW index for its nearest neighbors among chunks
-    already indexed and write edges above similarity_threshold. This is an
-    ANN query per chunk instead of the O(n^2) brute-force pairwise scan.
+    Three phases, in order -- this ordering matters for correctness, not
+    just style: chunk_edges has NOT NULL FK constraints on both
+    src_chunk_id and dst_chunk_id referencing chunks(id), so a candidate
+    neighbor must already exist as a real Postgres chunks row before an
+    edge naming it can be inserted, and Postgres is the source of truth
+    for "does this chunk exist" (see the design spec's Error Handling
+    section). Writing embeddings to DuckDB before a chunk's Postgres row
+    is confirmed inserted would risk exactly the FK violation this
+    ordering avoids, if that chunk's Postgres transaction were to fail.
+
+    1. Insert each chunk's paper (if new) and chunk row into Postgres, one
+       transaction per chunk -- collects the chunks whose Postgres row is
+       now guaranteed to exist.
+    2. Bulk-insert embeddings into DuckDB for exactly those chunks (a
+       single fast batch, not one insert per chunk -- see
+       DuckDBStore.insert_embeddings). Because this is one batch covering
+       the whole call, a chunk's later neighbor search can find its
+       batch-mates, not just chunks from earlier calls.
+    3. For each inserted chunk, query DuckDB for its nearest neighbors and
+       write chunk_edges rows above similarity_threshold, each in its own
+       transaction.
+
+    A failure in phase 3 for one chunk leaves that chunk searchable (it's
+    in Postgres and DuckDB) but edge-less -- a detectable, re-ingestable
+    degraded state, not silent corruption or an FK violation.
 
     Args:
         pool: asyncpg connection pool
         chunks: chunks with embeddings already populated
         papers: source_file -> {"doi", "title", "metadata"} for each chunk's paper
+        duckdb_store: open DuckDBStore for embeddings and neighbor search
         similarity_threshold: minimum cosine similarity for an edge
         max_neighbors: maximum edges per new chunk
 
@@ -41,19 +64,25 @@ async def insert_chunks(
     """
     stats = {"papers_inserted": 0, "chunks_inserted": 0, "edges_inserted": 0}
 
+    embeddable_chunks = []
+    for chunk in chunks:
+        if not chunk.embedding:
+            logger.warning(f"Chunk {chunk.id} has no embedding, skipping")
+            continue
+        embeddable_chunks.append(chunk)
+
+    if not embeddable_chunks:
+        return stats
+
+    inserted_chunks: list[Chunk] = []
+
     async with pool.acquire() as conn:
         inserted_papers = set()
-        for chunk in chunks:
-            if not chunk.embedding:
-                logger.warning(f"Chunk {chunk.id} has no embedding, skipping")
-                continue
 
+        # Phase 1: Postgres chunk/paper rows first.
+        for chunk in embeddable_chunks:
             paper = papers.get(chunk.source_file)
-            vector_literal = _embedding_to_vector_literal(chunk.embedding)
 
-            # One transaction per chunk: paper + chunk + edges commit or roll
-            # back together, so a failure partway through never leaves a
-            # chunk in the graph with only some of its edges written.
             async with conn.transaction():
                 if paper and paper["doi"] not in inserted_papers:
                     await conn.execute(
@@ -71,43 +100,39 @@ async def insert_chunks(
 
                 await conn.execute(
                     """
-                    INSERT INTO chunks (id, paper_doi, text, embedding, section, token_count)
-                    VALUES ($1, $2, $3, $4::pgcontext.vector, $5, $6)
+                    INSERT INTO chunks (id, paper_doi, text, section, token_count)
+                    VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     chunk.id,
                     paper["doi"] if paper else None,
                     chunk.text,
-                    vector_literal,
                     chunk.section,
                     chunk.token_count,
                 )
                 stats["chunks_inserted"] += 1
+            inserted_chunks.append(chunk)
 
-                neighbor_rows = await conn.fetch(
-                    """
-                    SELECT id, 1 - (embedding OPERATOR(pgcontext.<=>) $1::pgcontext.vector) AS similarity
-                    FROM chunks
-                    WHERE id != $2
-                    ORDER BY embedding OPERATOR(pgcontext.<=>) $1::pgcontext.vector
-                    LIMIT $3
-                    """,
-                    vector_literal,
-                    chunk.id,
-                    max_neighbors,
-                )
+        # Phase 2: bulk-insert embeddings into DuckDB, only for chunks whose
+        # Postgres row is now guaranteed to exist.
+        duckdb_store.insert_embeddings([(c.id, c.embedding) for c in inserted_chunks])
+        duckdb_store.ensure_index()
 
-                # The SQL query already applies `LIMIT max_neighbors`, but
-                # cap again here defensively so the max_neighbors guarantee
-                # holds even if a query result ever returns more rows than
-                # requested.
-                edges = [
-                    (chunk.id, row["id"], float(row["similarity"]))
-                    for row in neighbor_rows
-                    if row["similarity"] >= similarity_threshold
-                ][:max_neighbors]
+        # Phase 3: neighbor search + edges, now that every inserted chunk's
+        # embedding is queryable in DuckDB.
+        for chunk in inserted_chunks:
+            neighbors = duckdb_store.search(chunk.embedding, top_k=max_neighbors + 1)
 
-                if edges:
+            # The neighbor search can return the chunk itself (distance 0 /
+            # similarity 1.0); exclude it before capping.
+            edges = [
+                (chunk.id, neighbor_id, similarity)
+                for neighbor_id, similarity in neighbors
+                if neighbor_id != chunk.id and similarity >= similarity_threshold
+            ][:max_neighbors]
+
+            if edges:
+                async with conn.transaction():
                     await conn.executemany(
                         """
                         INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
