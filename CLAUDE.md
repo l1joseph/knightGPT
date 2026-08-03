@@ -33,6 +33,10 @@ squeue -u $USER                                  # check node assignments
 #   VLLM_INFERENCE_URL=http://<node>:8000/v1
 
 # Run API server (on login node, after vLLM servers are up)
+# NOTE: since the Postgres migration, the API requires a reachable Postgres
+# at settings.postgres.dsn (POSTGRES_DSN) at startup -- it previously
+# degraded gracefully without file-backed data, but now hard-fails without
+# Postgres (lifespan handler calls get_pg_pool() before serving requests).
 python -m src.api.main --host 0.0.0.0 --port 8080
 
 # SSH tunnel from local machine (match the login node hostname)
@@ -137,3 +141,4 @@ Defined in `pytest.ini`: `unit`, `integration`, `api`, `slow`. Fixtures in `test
 - **Node hostnames change:** Every SLURM job gets a different compute node. After `sbatch`, check `squeue -u $USER` and update `.env` with new hostnames.
 - **Login node mismatch:** The API server must run on the same login node as your SSH tunnel target. Use `hostname` to verify.
 - **Scratch path:** Cosmos uses `/cosmos/vast/scratch/$USER/`, not `/ddn_scratch/` (which is Barnacle2).
+- **DuckDB is single-writer:** The embedded DuckDB vector store (`src/graph/duckdb_store.py`, `settings.ingestion.duckdb_path`) supports exactly one read-write connection per file at a time. The API server holds a connection open for its entire lifetime (via `HybridRetriever` and the `/api/v1/ingest` path), so it cannot run concurrently against the same DuckDB file as any CLI ingestion script — `scripts/ingest_pipeline.py`, `scripts/download_papers.py --run-pipeline`, `scripts/populate_zotero.py --run-pipeline`, the weekly RSS auto-ingest cron, or `scripts/migrate_to_postgres.py`. Stop the API server before running any of these, or vice versa. `DuckDBStore.__init__` fails loudly with a clear `RuntimeError` on a lock conflict rather than hanging or corrupting data.

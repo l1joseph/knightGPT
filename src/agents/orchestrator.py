@@ -12,11 +12,10 @@ The orchestrator coordinates these stages via LLM calls.
 
 import json
 from dataclasses import dataclass, field
-from typing import Optional
 
 from openai import OpenAI
 
-from ..retrieval import GraphRAGRetriever, RAGEngine
+from ..retrieval import BaseRetriever, RAGEngine
 from ..tools.base import BaseTool, ToolResult
 from ..tools.pubmed import PubMedTool
 from ..tools.openalex import OpenAlexTool
@@ -104,7 +103,7 @@ class AgentOrchestrator:
 
     def __init__(
         self,
-        retriever: GraphRAGRetriever | None = None,
+        retriever: BaseRetriever | None = None,
         rag_engine: RAGEngine | None = None,
     ):
         self.retriever = retriever
@@ -228,10 +227,12 @@ class AgentOrchestrator:
                 items = result.data if isinstance(result.data, list) else [result.data]
                 for item in items[:5]:  # Keep top 5 per tool
                     if isinstance(item, dict):
-                        ctx.verified_citations.append({
-                            "source": result.tool_name,
-                            **item,
-                        })
+                        ctx.verified_citations.append(
+                            {
+                                "source": result.tool_name,
+                                **item,
+                            }
+                        )
 
         return ctx
 

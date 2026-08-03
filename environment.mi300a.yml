@@ -30,6 +30,7 @@ dependencies:
       - aiohttp>=3.9.0
       - tenacity>=8.2.3
       - python-dotenv>=1.0.0
+      - asyncpg>=0.29.0
 
       # OpenAI-compatible clients
       - openai>=1.12.0
@@ -47,7 +48,6 @@ dependencies:
 
       # Graph / persistence
       - pyvis>=0.3.2
-      - neo4j>=5.16.0
 
       # Scraping / requests
       - scrapy>=2.11.0

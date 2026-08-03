@@ -3,57 +3,64 @@
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..chunking import SemanticChunker
 from ..embedding import VLLMEmbedder
-from ..graph import KnowledgeGraphBuilder
+from ..graph import insert_chunks, DuckDBStore
 from ..ingestion import (
-    GoogleFormWebhook,
     batch_convert_pdfs,
     get_webhook_handler,
 )
-from ..retrieval import GraphRAGRetriever, RAGEngine
-from ..utils import get_logger, get_settings
+from ..ingestion.doi_resolver import build_doi_lookup, resolve_doi
+from ..retrieval import HybridRetriever, RAGEngine
+from ..utils import get_logger, get_pg_pool, get_settings
 
 logger = get_logger(__name__)
 settings = get_settings()
 
 
 # Global instances
-_retriever: Optional[GraphRAGRetriever] = None
+_pool = None
+_retriever: Optional[HybridRetriever] = None
 _rag_engine: Optional[RAGEngine] = None
+_duckdb_store: Optional[DuckDBStore] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global _retriever, _rag_engine
-    
-    # Load data on startup
-    chunks_path = settings.ingestion.processed_dir / "chunks_with_emb.json"
-    graph_path = settings.graph.graph_path
-    
-    if chunks_path.exists():
-        logger.info(f"Loading chunks from {chunks_path}")
-        _retriever = GraphRAGRetriever(
-            chunks_path=chunks_path,
-            graph_path=graph_path if graph_path.exists() else None,
-        )
-        _rag_engine = RAGEngine(retriever=_retriever)
-        logger.info("RAG engine initialized")
-    else:
-        logger.warning(f"No chunks file found at {chunks_path}")
-    
+    global _pool, _retriever, _rag_engine, _duckdb_store
+
+    # _pool backs the /api/v1/ingest background task's insert_chunks() calls
+    # (always awaited from this loop). _duckdb_store is the embedded vector
+    # store shared with _retriever for ANN search; it is owned here and
+    # closed on shutdown. _retriever manages its own separate Postgres pool
+    # internally on a private background loop — see
+    # src/retrieval/hybrid_retriever.py — because its retrieve() must stay
+    # callable synchronously from code that may already be inside a running
+    # event loop (e.g. /api/v1/search), which this loop's own pool can't
+    # support.
+    _pool = await get_pg_pool()
+    logger.info(f"DuckDB store: {settings.ingestion.duckdb_path.resolve()}")
+    _duckdb_store = DuckDBStore(str(settings.ingestion.duckdb_path))
+    _retriever = HybridRetriever(duckdb_store=_duckdb_store)
+    _rag_engine = RAGEngine(retriever=_retriever)
+    logger.info("RAG engine initialized (Postgres+DuckDB-backed)")
+
     yield
-    
-    # Cleanup
+
     logger.info("Shutting down...")
+    if _pool is not None:
+        await _pool.close()
+    if _retriever is not None:
+        _retriever.close()
+    if _duckdb_store is not None:
+        _duckdb_store.close()
 
 
 app = FastAPI(
@@ -76,7 +83,7 @@ app.add_middleware(
 # Pydantic models
 class ChatRequest(BaseModel):
     """Chat completion request."""
-    
+
     message: str = Field(..., description="User message")
     top_k: int = Field(default=5, description="Number of chunks to retrieve")
     max_tokens: int = Field(default=1024, description="Maximum response tokens")
@@ -86,7 +93,7 @@ class ChatRequest(BaseModel):
 
 class Citation(BaseModel):
     """Citation information."""
-    
+
     source_file: str
     section: Optional[str]
     text_snippet: str
@@ -95,14 +102,14 @@ class Citation(BaseModel):
 
 class ChatResponse(BaseModel):
     """Chat completion response."""
-    
+
     answer: str
     citations: list[Citation]
 
 
 class IngestRequest(BaseModel):
     """Document ingestion request."""
-    
+
     pdf_path: Optional[str] = None
     pdf_directory: Optional[str] = None
     force_ocr: bool = False
@@ -110,15 +117,15 @@ class IngestRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     """Semantic search request."""
-    
+
     query: str
-    top_k: int = Field(default=10)
+    top_k: int = Field(default=10, ge=1, le=100)
     expand_context: bool = Field(default=True)
 
 
 class SearchResult(BaseModel):
     """Search result item."""
-    
+
     chunk_id: str
     text: str
     source_file: str
@@ -128,12 +135,13 @@ class SearchResult(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
-    
+
     status: str
     embedding_server: bool
     inference_server: bool
     chunks_loaded: int
     graph_nodes: int
+    chunk_embeddings_count: int
 
 
 def get_rag_engine() -> RAGEngine:
@@ -146,7 +154,7 @@ def get_rag_engine() -> RAGEngine:
     return _rag_engine
 
 
-def get_retriever() -> GraphRAGRetriever:
+def get_retriever() -> HybridRetriever:
     """Dependency for retriever."""
     if _retriever is None:
         raise HTTPException(
@@ -162,15 +170,16 @@ async def health_check():
     """Check service health."""
     embedding_healthy = False
     inference_healthy = False
-    
+
     try:
         embedder = VLLMEmbedder()
         embedding_healthy = embedder.check_health()
     except Exception as e:
         logger.error(f"Embedding health check failed: {e}")
-    
+
     try:
         from openai import OpenAI
+
         client = OpenAI(
             api_key="EMPTY",
             base_url=settings.vllm.inference_url,
@@ -180,22 +189,32 @@ async def health_check():
         inference_healthy = True
     except Exception as e:
         logger.error(f"Inference health check failed: {e}")
-    
-    chunks_count = len(_retriever.chunks) if _retriever else 0
-    graph_nodes = (
-        _retriever.graph_builder.graph.number_of_nodes()
-        if _retriever and _retriever.graph_builder and _retriever.graph_builder.graph
-        else 0
-    )
-    
+
+    chunks_count = 0
+    graph_nodes = 0
+    if _pool is not None:
+        async with _pool.acquire() as conn:
+            chunks_count = await conn.fetchval("SELECT count(*) FROM chunks")
+            graph_status = await conn.fetchrow("SELECT node_count FROM graph.status()")
+            graph_nodes = graph_status["node_count"] if graph_status else 0
+
+    chunk_embeddings_count = 0
+    if _duckdb_store is not None:
+        # Dispatched via asyncio.to_thread -- see postgres_builder.py's
+        # comment on why synchronous DuckDB calls shouldn't block the
+        # event loop, and duckdb_store.py's comment on why every DuckDB
+        # call is serialized behind DuckDBStore's internal lock.
+        chunk_embeddings_count = await asyncio.to_thread(_duckdb_store.count)
+
     status = "healthy" if embedding_healthy and inference_healthy else "degraded"
-    
+
     return HealthResponse(
         status=status,
         embedding_server=embedding_healthy,
         inference_server=inference_healthy,
         chunks_loaded=chunks_count,
         graph_nodes=graph_nodes,
+        chunk_embeddings_count=chunk_embeddings_count,
     )
 
 
@@ -206,7 +225,7 @@ async def chat(
 ):
     """
     RAG-enhanced chat completion.
-    
+
     Retrieves relevant context from the knowledge graph and generates
     a response using the LLM.
     """
@@ -221,12 +240,12 @@ async def chat(
             ):
                 yield f"data: {token}\n\n"
             yield "data: [DONE]\n\n"
-        
+
         return StreamingResponse(
             generate(),
             media_type="text/event-stream",
         )
-    
+
     # Non-streaming response
     response = await rag_engine.query_async(
         question=request.message,
@@ -234,7 +253,7 @@ async def chat(
         max_tokens=request.max_tokens,
         temperature=request.temperature,
     )
-    
+
     citations = [
         Citation(
             source_file=c.source_file,
@@ -244,7 +263,7 @@ async def chat(
         )
         for c in response.citations
     ]
-    
+
     return ChatResponse(
         answer=response.answer,
         citations=citations,
@@ -254,11 +273,11 @@ async def chat(
 @app.post("/api/v1/search")
 async def semantic_search(
     request: SearchRequest,
-    retriever: GraphRAGRetriever = Depends(get_retriever),
+    retriever: HybridRetriever = Depends(get_retriever),
 ) -> list[SearchResult]:
     """
     Semantic search over the knowledge base.
-    
+
     Returns relevant chunks without LLM generation.
     """
     result = retriever.retrieve(
@@ -266,12 +285,12 @@ async def semantic_search(
         top_k=request.top_k,
         expand_context=request.expand_context,
     )
-    
+
     # Ensure chunks and scores have matching lengths
     min_len = min(len(result.chunks), len(result.similarity_scores))
     chunks = result.chunks[:min_len]
     scores = result.similarity_scores[:min_len]
-    
+
     return [
         SearchResult(
             chunk_id=chunk.id,
@@ -291,21 +310,22 @@ async def ingest_documents(
 ):
     """
     Ingest new documents into the knowledge base.
-    
+
     Runs asynchronously in the background.
     """
+
     async def process_ingestion():
         try:
             if request.pdf_path:
                 from ..ingestion import convert_pdf_to_markdown
-                
+
                 result = convert_pdf_to_markdown(
                     pdf_path=Path(request.pdf_path),
                     output_dir=settings.ingestion.markdown_dir,
                     force_ocr=request.force_ocr,
                 )
                 logger.info(f"Ingested: {result}")
-                
+
             elif request.pdf_directory:
                 results = batch_convert_pdfs(
                     input_dir=Path(request.pdf_directory),
@@ -313,58 +333,42 @@ async def ingest_documents(
                     force_ocr=request.force_ocr,
                 )
                 logger.info(f"Ingested {len(results)} files")
-            
-            # Re-chunk, embed, and rebuild graph
-            from ..chunking import SemanticChunker, save_chunks, load_chunks
+
+            # Chunk new markdown files and embed
+            from ..chunking import SemanticChunker
             from ..embedding import VLLMEmbedder
-            from ..graph import build_graph_from_chunks
-            
-            # Load existing chunks
-            chunks_file = settings.ingestion.processed_dir / "chunks_with_emb.json"
-            existing_chunks = []
-            if chunks_file.exists():
-                existing_chunks = load_chunks(chunks_file)
-            
-            # Chunk new markdown files
+
             chunker = SemanticChunker()
             new_chunks = chunker.chunk_directory(
                 settings.ingestion.markdown_dir,
-                settings.ingestion.processed_dir / "chunks_new.json"
+                settings.ingestion.processed_dir / "chunks_new.json",
             )
-            
-            # Generate embeddings for new chunks
+
             embedder = VLLMEmbedder()
             if embedder.check_health():
                 new_chunks = embedder.embed_chunks(new_chunks)
-            
-            # Merge with existing chunks
-            all_chunks = existing_chunks + new_chunks
-            
-            # Save updated chunks
-            save_chunks(all_chunks, chunks_file)
-            
-            # Rebuild graph
-            graph_file = settings.graph.graph_path
-            build_graph_from_chunks(
-                chunks_path=chunks_file,
-                output_path=graph_file,
-                threshold=settings.graph.similarity_threshold,
-            )
-            
-            # Reload retriever and engine
-            global _retriever, _rag_engine
-            _retriever = GraphRAGRetriever(
-                chunks_path=chunks_file,
-                graph_path=graph_file if graph_file.exists() else None,
-            )
-            _rag_engine = RAGEngine(retriever=_retriever)
-            logger.info("Knowledge base updated and reloaded")
-            
+
+            doi_lookup = build_doi_lookup()
+            papers = {
+                c.source_file: {
+                    "doi": (
+                        resolve_doi(c.source_file, doi_lookup)
+                        if c.source_file
+                        else None
+                    ),
+                    "title": "",
+                    "metadata": c.metadata,
+                }
+                for c in new_chunks
+            }
+            insert_stats = await insert_chunks(_pool, new_chunks, papers, _duckdb_store)
+            logger.info(f"Knowledge base updated: {insert_stats}")
+
         except Exception as e:
             logger.error(f"Ingestion failed: {e}", exc_info=True)
-    
+
     background_tasks.add_task(process_ingestion)
-    
+
     return {"status": "accepted", "message": "Ingestion started in background"}
 
 
@@ -376,7 +380,6 @@ class RSSIngestRequest(BaseModel):
         description="Feed names to check (None = all)",
     )
     max_papers: int = Field(default=20, description="Max papers to ingest")
-    sync_neo4j: bool = Field(default=False, description="Sync to Neo4j")
 
 
 @app.post("/api/v1/ingest/rss")
@@ -390,6 +393,7 @@ async def ingest_from_rss(
     Discovers papers from configured RSS feeds, downloads PDFs,
     and runs the ingestion pipeline.
     """
+
     async def process_rss():
         try:
             from ..ingestion.rss_feed import RSSFeedIngester, DEFAULT_FEEDS
@@ -400,18 +404,11 @@ async def ingest_from_rss(
 
             ingester = RSSFeedIngester(feeds=feeds)
             papers = ingester.discover_from_rss()
-            papers = papers[:request.max_papers]
+            papers = papers[: request.max_papers]
 
             if papers:
                 stats = ingester.download_and_ingest(papers)
                 logger.info(f"RSS ingestion: {stats}")
-
-                if request.sync_neo4j and stats.get("downloaded", 0) > 0:
-                    from ..storage import sync_to_neo4j
-                    chunks_file = settings.ingestion.processed_dir / "chunks_with_emb.json"
-                    graph_file = settings.graph.graph_path
-                    if chunks_file.exists():
-                        sync_to_neo4j(chunks_file, graph_file)
             else:
                 logger.info("No new papers found in RSS feeds")
 
@@ -432,7 +429,6 @@ class BriefingRequest(BaseModel):
         description="Explicit paper list [{doi, url, title, summary}]",
     )
     source: str = Field(default="manual", description="Source identifier")
-    sync_neo4j: bool = Field(default=False, description="Sync to Neo4j")
 
 
 @app.post("/api/v1/ingest/briefing")
@@ -450,11 +446,13 @@ async def ingest_briefing(
 
     # Parse the briefing
     if request.papers:
-        parsed = parse_briefing_json({
-            "text": request.text,
-            "papers": request.papers,
-            "source": request.source,
-        })
+        parsed = parse_briefing_json(
+            {
+                "text": request.text,
+                "papers": request.papers,
+                "source": request.source,
+            }
+        )
     else:
         parsed = parse_briefing_text(request.text, source=request.source)
 
@@ -483,13 +481,6 @@ async def ingest_briefing(
 
             stats = ingester.download_and_ingest(papers)
             logger.info(f"Briefing ingestion: {stats}")
-
-            if request.sync_neo4j and stats.get("downloaded", 0) > 0:
-                from ..storage import sync_to_neo4j
-                chunks_file = settings.ingestion.processed_dir / "chunks_with_emb.json"
-                graph_file = settings.graph.graph_path
-                if chunks_file.exists():
-                    sync_to_neo4j(chunks_file, graph_file)
 
         except Exception as e:
             logger.error(f"Briefing ingestion failed: {e}", exc_info=True)
@@ -528,7 +519,6 @@ async def briefing_webhook(
         text=data.get("text", ""),
         papers=data.get("papers"),
         source=data.get("source", "webhook"),
-        sync_neo4j=data.get("sync_neo4j", True),
     )
 
     return await ingest_briefing(briefing_req, background_tasks)
@@ -608,24 +598,25 @@ async def openai_chat_completions(
 ):
     """
     OpenAI-compatible chat completions endpoint.
-    
+
     For integration with Open WebUI and other OpenAI-compatible clients.
     """
     data = await request.json()
     messages = data.get("messages", [])
     stream = data.get("stream", False)
-    
+
     # Get the last user message
     user_message = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
             user_message = msg.get("content")
             break
-    
+
     if not user_message:
         raise HTTPException(status_code=400, detail="No user message found")
-    
+
     if stream:
+
         async def generate():
             async for token in rag_engine.query_stream(
                 question=user_message,
@@ -645,7 +636,7 @@ async def openai_chat_completions(
                     ],
                 }
                 yield f"data: {__import__('json').dumps(chunk)}\n\n"
-            
+
             # Final chunk
             final_chunk = {
                 "id": "chatcmpl-knightgpt",
@@ -660,12 +651,12 @@ async def openai_chat_completions(
             }
             yield f"data: {__import__('json').dumps(final_chunk)}\n\n"
             yield "data: [DONE]\n\n"
-        
+
         return StreamingResponse(
             generate(),
             media_type="text/event-stream",
         )
-    
+
     # Non-streaming
     response = await rag_engine.query_async(
         question=user_message,
@@ -673,7 +664,7 @@ async def openai_chat_completions(
         max_tokens=data.get("max_tokens", 1024),
         temperature=data.get("temperature", 0.7),
     )
-    
+
     return {
         "id": "chatcmpl-knightgpt",
         "object": "chat.completion",
@@ -702,7 +693,7 @@ def run_server(
 ):
     """Run the FastAPI server."""
     import uvicorn
-    
+
     uvicorn.run(
         "src.api.main:app",
         host=host,
@@ -713,11 +704,11 @@ def run_server(
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Run KnightGPT API server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--reload", action="store_true")
-    
+
     args = parser.parse_args()
     run_server(host=args.host, port=args.port, reload=args.reload)

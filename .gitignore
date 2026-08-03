@@ -43,6 +43,8 @@ data/raw_pdfs/*.pdf
 data/markdown/*.md
 data/processed/*.json
 data/processed/*.graphml
+data/processed/*.duckdb
+data/processed/*.duckdb.wal
 data/paper_lists/*.tsv
 
 # Misc
