@@ -10,13 +10,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..embedding import VLLMEmbedder
-from ..graph import insert_chunks
+from ..graph import insert_chunks, DuckDBStore
 from ..ingestion import (
     batch_convert_pdfs,
     get_webhook_handler,
 )
 from ..ingestion.doi_resolver import build_doi_lookup, resolve_doi
-from ..retrieval import PostgresRetriever, RAGEngine
+from ..retrieval import HybridRetriever, RAGEngine
 from ..utils import get_logger, get_pg_pool, get_settings
 
 logger = get_logger(__name__)
@@ -25,26 +25,30 @@ settings = get_settings()
 
 # Global instances
 _pool = None
-_retriever: Optional[PostgresRetriever] = None
+_retriever: Optional[HybridRetriever] = None
 _rag_engine: Optional[RAGEngine] = None
+_duckdb_store: Optional[DuckDBStore] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global _pool, _retriever, _rag_engine
+    global _pool, _retriever, _rag_engine, _duckdb_store
 
     # _pool backs the /api/v1/ingest background task's insert_chunks() calls
-    # (always awaited from this loop). _retriever manages its own separate
-    # pool internally on a private background loop — see
-    # src/retrieval/postgres_retriever.py — because its retrieve() must stay
+    # (always awaited from this loop). _duckdb_store is the embedded vector
+    # store shared with _retriever for ANN search; it is owned here and
+    # closed on shutdown. _retriever manages its own separate Postgres pool
+    # internally on a private background loop — see
+    # src/retrieval/hybrid_retriever.py — because its retrieve() must stay
     # callable synchronously from code that may already be inside a running
     # event loop (e.g. /api/v1/search), which this loop's own pool can't
     # support.
     _pool = await get_pg_pool()
-    _retriever = PostgresRetriever()
+    _duckdb_store = DuckDBStore(str(settings.ingestion.duckdb_path))
+    _retriever = HybridRetriever(duckdb_store=_duckdb_store)
     _rag_engine = RAGEngine(retriever=_retriever)
-    logger.info("RAG engine initialized (Postgres-backed)")
+    logger.info("RAG engine initialized (Postgres+DuckDB-backed)")
 
     yield
 
@@ -53,6 +57,8 @@ async def lifespan(app: FastAPI):
         await _pool.close()
     if _retriever is not None:
         _retriever.close()
+    if _duckdb_store is not None:
+        _duckdb_store.close()
 
 
 app = FastAPI(
@@ -145,7 +151,7 @@ def get_rag_engine() -> RAGEngine:
     return _rag_engine
 
 
-def get_retriever() -> PostgresRetriever:
+def get_retriever() -> HybridRetriever:
     """Dependency for retriever."""
     if _retriever is None:
         raise HTTPException(
@@ -255,7 +261,7 @@ async def chat(
 @app.post("/api/v1/search")
 async def semantic_search(
     request: SearchRequest,
-    retriever: PostgresRetriever = Depends(get_retriever),
+    retriever: HybridRetriever = Depends(get_retriever),
 ) -> list[SearchResult]:
     """
     Semantic search over the knowledge base.
@@ -343,7 +349,7 @@ async def ingest_documents(
                 }
                 for c in new_chunks
             }
-            insert_stats = await insert_chunks(_pool, new_chunks, papers)
+            insert_stats = await insert_chunks(_pool, new_chunks, papers, _duckdb_store)
             logger.info(f"Knowledge base updated: {insert_stats}")
 
         except Exception as e:

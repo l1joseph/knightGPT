@@ -18,14 +18,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils import get_logger, setup_logging, get_pg_pool
+from src.utils import get_logger, setup_logging, get_pg_pool, get_settings
 from src.ingestion import batch_convert_pdfs
 from src.ingestion.doi_resolver import build_doi_lookup, resolve_doi
 from src.chunking import SemanticChunker, save_chunks
 from src.embedding import VLLMEmbedder
-from src.graph import insert_chunks
+from src.graph import insert_chunks, DuckDBStore
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 
 def run_pipeline(
@@ -105,15 +106,18 @@ def run_pipeline(
                 # create and use the pool inside the same asyncio.run() call
                 # rather than across separate ones.
                 pool = await get_pg_pool()
+                store = DuckDBStore(str(settings.ingestion.duckdb_path))
                 try:
                     return await insert_chunks(
                         pool,
                         all_chunks,
                         papers,
+                        store,
                         similarity_threshold=similarity_threshold,
                     )
                 finally:
                     await pool.close()
+                    store.close()
 
             insert_stats = asyncio.run(_do_insert())
             stats["postgres_insert"] = insert_stats

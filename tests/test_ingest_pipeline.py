@@ -24,7 +24,9 @@ def test_run_pipeline_calls_insert_chunks_not_build_graph_from_chunks(tmp_path):
         "scripts.ingest_pipeline.get_pg_pool", new_callable=AsyncMock
     ), patch(
         "scripts.ingest_pipeline.insert_chunks", new_callable=AsyncMock
-    ) as mock_insert:
+    ) as mock_insert, patch(
+        "scripts.ingest_pipeline.DuckDBStore"
+    ):
 
         MockChunker.return_value.chunk_directory.return_value = []
         mock_embedder = MockEmbedder.return_value
@@ -79,6 +81,8 @@ def test_run_pipeline_resolves_real_doi_not_source_file_path(tmp_path):
     ) as mock_insert, patch(
         "scripts.ingest_pipeline.build_doi_lookup",
         return_value={"10-1128_mbio-00519-19": real_doi},
+    ), patch(
+        "scripts.ingest_pipeline.DuckDBStore"
     ):
 
         MockChunker.return_value.chunk_directory.return_value = [embedded_chunk]
@@ -94,6 +98,6 @@ def test_run_pipeline_resolves_real_doi_not_source_file_path(tmp_path):
         run_pipeline(input_dir=input_dir, output_dir=output_dir)
 
         mock_insert.assert_called_once()
-        _pool, _chunks, papers = mock_insert.call_args.args
+        _pool, _chunks, papers, _store = mock_insert.call_args.args
         assert papers[source_file]["doi"] == real_doi
         assert papers[source_file]["doi"] != source_file
