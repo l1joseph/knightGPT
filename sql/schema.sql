@@ -1,5 +1,4 @@
 -- sql/schema.sql
-CREATE EXTENSION IF NOT EXISTS pgcontext;
 CREATE EXTENSION IF NOT EXISTS graph;
 
 CREATE TABLE IF NOT EXISTS papers (
@@ -12,14 +11,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     id           text PRIMARY KEY,
     paper_doi    text REFERENCES papers(doi),
     text         text NOT NULL,
-    embedding    pgcontext.vector(3584) NOT NULL,
     section      text,
     token_count  integer
 );
-
-CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
-ON chunks
-USING pgcontext_hnsw (embedding pgcontext.vector_hnsw_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS chunk_edges (
     src_chunk_id text NOT NULL REFERENCES chunks(id),
