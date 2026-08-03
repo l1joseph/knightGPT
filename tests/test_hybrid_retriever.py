@@ -157,3 +157,34 @@ def test_pool_created_exactly_once_at_construction(tmp_path):
     store.close()
 
     assert mock_create_pool.call_count == 1
+
+
+@pytest.mark.unit
+def test_retrieve_callable_from_inside_a_running_event_loop(tmp_path):
+    """The real bug this design fixes: retrieve() must work when called
+    synchronously from code that is itself already inside a running event
+    loop (e.g. a FastAPI async def endpoint calling .retrieve() without
+    await, matching src/api/main.py's /api/v1/search and
+    src/agents/orchestrator.py's usage)."""
+    import asyncio
+
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool([[]])
+    embedder = MagicMock()
+    embedder.embed_text.return_value = [0.1, 0.0, 0.0, 0.0]
+
+    async def call_from_within_a_running_loop():
+        with patch(
+            "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+            new=AsyncMock(return_value=pool),
+        ):
+            retriever = HybridRetriever(dsn="postgresql://test", duckdb_store=store, embedder=embedder)
+            result = retriever.retrieve("query", expand_context=False)
+            retriever.close()
+            return result
+
+    result = asyncio.run(call_from_within_a_running_loop())
+    store.close()
+    assert result.chunks == []
