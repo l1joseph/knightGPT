@@ -44,7 +44,27 @@ class DuckDBStore:
 
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        self._con = duckdb.connect(db_path)
+        try:
+            self._con = duckdb.connect(db_path)
+        except duckdb.IOException as e:
+            # DuckDB supports exactly one read-write connection per file at
+            # a time (see https://duckdb.org/docs/stable/connect/concurrency).
+            # This repo has multiple separate OS processes that each open
+            # this same file directly -- the API server (for the lifetime
+            # of the process, via HybridRetriever + the /api/v1/ingest
+            # path) and every CLI ingestion entry point (ingest_pipeline.py,
+            # download_papers.py --run-pipeline, populate_zotero.py
+            # --run-pipeline, the weekly RSS auto-ingest cron,
+            # migrate_to_postgres.py) -- so a lock conflict here is an
+            # expected, documented failure mode, not a bug. See this
+            # repo's CLAUDE.md "Important Quirks" section.
+            raise RuntimeError(
+                f"Cannot open DuckDB store at {db_path} -- the file is "
+                f"locked by another process. DuckDB supports one "
+                f"read-write connection at a time; stop the API server "
+                f"before running CLI ingestion scripts (or vice versa) "
+                f"against this database file."
+            ) from e
         self._con.execute("INSTALL vss")
         self._con.execute("LOAD vss")
         # DuckDB gates persisted HNSW indexes behind this flag because the
