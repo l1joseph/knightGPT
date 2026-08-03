@@ -20,6 +20,60 @@ DSN = os.environ.get(
 )
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dry_run_counts_chunks_edges_papers(tmp_path):
+    """Test that dry_run mode counts chunks, edges, and papers correctly,
+    and accepts the new duckdb_path parameter."""
+    chunks_path = tmp_path / "chunks_with_emb.json"
+    chunks_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "c1",
+                    "text": "hello",
+                    "source_file": "p1.md",
+                    "section": "Intro",
+                    "token_count": 5,
+                    "embedding": [0.1] * 4,
+                    "metadata": {},
+                },
+                {
+                    "id": "c2",
+                    "text": "world",
+                    "source_file": "p1.md",
+                    "section": "Methods",
+                    "token_count": 5,
+                    "embedding": [0.2] * 4,
+                    "metadata": {},
+                },
+            ]
+        )
+    )
+
+    graph_path = tmp_path / "graph.graphml"
+    g = nx.Graph()
+    g.add_edge("c1", "c2", similarity=0.8)
+    nx.write_graphml(g, str(graph_path))
+
+    paper_lists_dir = tmp_path / "paper_lists"
+    paper_lists_dir.mkdir()
+
+    result = await migrate(
+        dsn="postgresql://unused",
+        chunks_path=chunks_path,
+        graph_path=graph_path,
+        duckdb_path=tmp_path / "unused.duckdb",
+        dry_run=True,
+        paper_lists_dir=paper_lists_dir,
+    )
+
+    assert result["dry_run"] is True
+    assert result["chunks_migrated"] == 2
+    assert result["edges_migrated"] == 1
+    assert result["papers_migrated"] == 1
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_migrate_preserves_chunk_and_edge_counts(tmp_path):
@@ -59,7 +113,7 @@ async def test_migrate_preserves_chunk_and_edge_counts(tmp_path):
         graph_path = tmp_path / "graph.graphml"
         nx.write_graphml(graph, str(graph_path))
 
-        result = await migrate(DSN, chunks_path, graph_path, dry_run=False)
+        result = await migrate(DSN, chunks_path, graph_path, tmp_path / "test.duckdb", dry_run=False)
 
         chunk_count = await conn.fetchval("SELECT count(*) FROM chunks")
         edge_count = await conn.fetchval("SELECT count(*) FROM chunk_edges")
@@ -195,6 +249,7 @@ async def test_migrate_dry_run_dedupes_papers_by_resolved_doi(tmp_path):
         "unused-dsn-not-connected-to-in-dry-run",
         chunks_path,
         graph_path,
+        tmp_path / "unused.duckdb",
         dry_run=True,
         paper_lists_dir=paper_lists_dir,
     )

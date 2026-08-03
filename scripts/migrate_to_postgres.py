@@ -14,6 +14,7 @@ import asyncpg
 import networkx as nx
 
 from src.chunking import load_chunks
+from src.graph.duckdb_store import DuckDBStore
 from src.ingestion.doi_resolver import DEFAULT_PAPER_LISTS_DIR
 from src.ingestion.doi_resolver import build_doi_lookup as _build_doi_lookup
 from src.ingestion.doi_resolver import resolve_doi as _resolve_doi
@@ -23,23 +24,22 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 
-def _embedding_to_vector_literal(embedding: list[float]) -> str:
-    return "[" + ",".join(repr(x) for x in embedding) + "]"
-
-
 async def migrate(
     dsn: str,
     chunks_path: Path,
     graph_path: Path,
+    duckdb_path: Path,
     dry_run: bool = False,
     paper_lists_dir: Path = DEFAULT_PAPER_LISTS_DIR,
 ) -> dict:
-    """Migrate chunks_with_emb.json + graph.graphml into Postgres.
+    """Migrate chunks_with_emb.json + graph.graphml into Postgres (text,
+    graph structure) and DuckDB (embeddings).
 
     Args:
         dsn: Postgres connection string
         chunks_path: path to chunks_with_emb.json
         graph_path: path to graph.graphml
+        duckdb_path: path to the DuckDB embeddings database file
         dry_run: if True, only count what would be migrated, write nothing
         paper_lists_dir: directory of checked-in DOI list files (*.txt),
             used to resolve each chunk's source_file (a markdown path
@@ -76,6 +76,7 @@ async def migrate(
             "dry_run": True,
         }
 
+    store = DuckDBStore(str(duckdb_path))
     conn = await asyncpg.connect(dsn)
     try:
         for doi, source_file in papers_seen.items():
@@ -89,6 +90,10 @@ async def migrate(
                 Path(source_file).stem,
             )
 
+        embeddable_chunks = [c for c in chunks if c.embedding]
+        store.insert_embeddings([(c.id, c.embedding) for c in embeddable_chunks])
+        store.ensure_index()
+
         chunks_migrated = 0
         for chunk in chunks:
             if not chunk.embedding:
@@ -101,14 +106,13 @@ async def migrate(
             )
             await conn.execute(
                 """
-                INSERT INTO chunks (id, paper_doi, text, embedding, section, token_count)
-                VALUES ($1, $2, $3, $4::pgcontext.vector, $5, $6)
+                INSERT INTO chunks (id, paper_doi, text, section, token_count)
+                VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (id) DO NOTHING
                 """,
                 chunk.id,
                 paper_doi,
                 chunk.text,
-                _embedding_to_vector_literal(chunk.embedding),
                 chunk.section,
                 chunk.token_count,
             )
@@ -129,6 +133,7 @@ async def migrate(
         await conn.execute("SELECT * FROM graph.build()")
     finally:
         await conn.close()
+        store.close()
 
     return {
         "chunks_migrated": chunks_migrated,
@@ -145,6 +150,7 @@ def main():
     parser.add_argument("--dsn", type=str, default=None)
     parser.add_argument("--chunks", type=Path, default=None)
     parser.add_argument("--graph", type=Path, default=None)
+    parser.add_argument("--duckdb-path", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--log-level", type=str, default="INFO")
     args = parser.parse_args()
@@ -154,12 +160,14 @@ def main():
         args.chunks or settings.ingestion.processed_dir / "chunks_with_emb.json"
     )
     graph_path = args.graph or settings.graph.graph_path
+    duckdb_path = args.duckdb_path or settings.ingestion.duckdb_path
 
     result = asyncio.run(
         migrate(
             args.dsn or settings.postgres.dsn,
             chunks_path,
             graph_path,
+            duckdb_path,
             dry_run=args.dry_run,
         )
     )
