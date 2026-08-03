@@ -21,3 +21,7 @@ pydantic==2.11.4
 
 # LLM client
 ollama==0.5.1
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0

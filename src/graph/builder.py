@@ -6,7 +6,6 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 class GraphBuilder:
     """

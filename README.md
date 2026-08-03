@@ -1,47 +1,77 @@
-# Microbiome RAG Chatbot
+# knightGPT - Microbiome RAG Chatbot
 
-This repository implements a Retrieval-Augmented Generation (RAG) chatbot specialized in microbiome research. It extracts text and metadata from scientific PDFs, builds a semantic paragraph-level knowledge graph, and enables interactive querying via Ollama's llama3.
+A Retrieval-Augmented Generation (RAG) chatbot specialized in microbiome research. It extracts text and metadata from scientific PDFs, builds a semantic paragraph-level knowledge graph, and enables interactive querying via local LLM (Ollama).
+
+## Features
+
+- PDF text and metadata extraction with DOI detection
+- Paragraph-level text chunking with sentence boundary awareness
+- Semantic embeddings using SentenceTransformers
+- Graph-based context expansion for improved retrieval
+- Local LLM inference via Ollama (no API keys required)
+- Inline citations with document metadata
 
 ---
 
 ## Repository Structure
 
 ```
-microbiome-rag-bot/
+knightGPT/
 ├── data/
-│   ├── raw_pdfs/             # Source PDF files
-│   ├── processed_pages.json   # Output from pdf_reader.py (metadata + pages)
-│   ├── chunks.json            # Paragraph chunks (output of chunker.py)
-│   ├── chunks_with_emb.json   # Chunks enriched with embeddings
-│   └── graph.graphml          # Semantic graph in GraphML format
+│   ├── raw_pdfs/              # Source PDF files
+│   ├── processed_pages.json   # Output from pdf_reader.py
+│   ├── chunks.json            # Paragraph chunks
+│   ├── chunks_with_emb.json   # Chunks with embeddings
+│   └── graph.graphml          # Semantic graph
 │
 ├── src/
+│   ├── __init__.py
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── app.py             # RAGChatbot class & CLI
+│   │
 │   ├── ingestion/
+│   │   ├── __init__.py
 │   │   └── pdf_reader.py      # PDF → pages + metadata
 │   │
 │   ├── chunking/
+│   │   ├── __init__.py
 │   │   └── chunker.py         # Pages → paragraph chunks
 │   │
 │   ├── embedding/
+│   │   ├── __init__.py
 │   │   └── embedder.py        # Chunks → vector embeddings
 │   │
 │   ├── graph/
-│   │   └── builder.py         # Build semantic graph via cosine similarity
+│   │   ├── __init__.py
+│   │   ├── builder.py         # Build semantic graph
+│   │   └── storage.py         # Neo4j persistence (optional)
 │   │
-│   ├── storage/
-│   │   └── storage.py         # (Optional) Persist graph to Neo4j
+│   ├── metadata/
+│   │   ├── __init__.py
+│   │   └── extractor.py       # Standalone metadata extraction
 │   │
 │   ├── retrieval/
-│   │   └── retriever.py       # Queryable RAG retriever
+│   │   ├── __init__.py
+│   │   └── retriever.py       # Semantic search + graph expansion
 │   │
-│   ├── utils/
-│   │   └── logging.py         # Centralized logging configuration
-│   │
-│   └── cli.py                 # Terminal-based chatbot CLI
+│   └── utils/
+│       ├── __init__.py
+│       └── logging.py         # Centralized logging
 │
-├── architecture.md            # System architecture overview
-├── requirements.txt           # Python dependencies
-└── README.md                  # (This file)
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py            # Pytest fixtures
+│   ├── test_pdf_reader.py
+│   ├── test_chunker.py
+│   ├── test_retriever.py
+│   └── test_app.py
+│
+├── docs/
+│   └── architecture.md        # System architecture
+│
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -50,126 +80,207 @@ microbiome-rag-bot/
 
 ### 1. Setup
 
-1. **Clone and navigate**
-
-   ```bash
-   git clone <repo-url>
-   cd microbiome-rag-bot
-   ```
-
-2. **Python environment**
-
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
-
-3. **Ollama & llama3**
-
-   ```bash
-   # macOS (or see ollama.com for other platforms)
-   brew install ollama
-   ollama pull llama3
-   ```
-
----
-
-### 2. Build the Knowledge Graph
-
-1. **Extract pages + metadata**
-
-   ```bash
-   python src/ingestion/pdf_reader.py \
-     data/raw_pdfs/your_paper.pdf \
-     -o data/processed_pages.json
-   ```
-
-   Output: `data/processed_pages.json` with `metadata` (title, authors, DOI, date) and `pages`.
-
-2. **Chunk paragraphs**
-
-   ```bash
-   python src/chunking/chunker.py \
-     --pages data/processed_pages.json \
-     --output data/chunks.json \
-     --max_tokens 500
-   ```
-
-   Output: `data/chunks.json` with paragraph-level chunks.
-
-3. **Embed chunks**
-
-   ```bash
-   python src/embedding/embedder.py \
-     --input data/chunks.json \
-     --output data/chunks_with_emb.json \
-     --model all-MiniLM-L6-v2
-   ```
-
-4. **Build semantic graph**
-
-   ```bash
-   python src/graph/builder.py \
-     --input data/chunks_with_emb.json \
-     --output data/graph.graphml \
-     --threshold 0.7
-   ```
-
-5. *(Optional)* **Load into Neo4j**
-
-   ```bash
-   python src/storage/storage.py \
-     --action write \
-     --input data/chunks_with_emb.json \
-     --uri bolt://localhost:7687 \
-     --user neo4j --password <pw>
-   ```
-
----
-
-### 3. Run the Chatbot (CLI)
-
-Launch the terminal-based interface:
-
 ```bash
-python src/cli.py --top_k 5 --hops 1
+# Clone the repository
+git clone https://github.com/l1joseph/knightGPT.git
+cd knightGPT
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Download spaCy model
+python -m spacy download en_core_web_sm
 ```
 
-* **`top_k`**: initial number of chunks to retrieve.
-* **`hops`**: number of graph hops for context expansion.
+### 2. Install Ollama
 
-Type your question at the prompt. Citations will display with Title & DOI.
+```bash
+# macOS
+brew install ollama
+
+# Start Ollama service
+ollama serve
+
+# Pull the llama3 model (in a new terminal)
+ollama pull llama3
+```
+
+---
+
+## Building the Knowledge Graph
+
+### Step 1: Extract PDF content
+
+```bash
+python src/ingestion/pdf_reader.py \
+  data/raw_pdfs/your_paper.pdf \
+  -o data/processed_pages.json
+```
+
+Output: JSON with `metadata` (title, authors, DOI, date) and `pages` array.
+
+### Step 2: Chunk into paragraphs
+
+```bash
+python src/chunking/chunker.py \
+  --pages data/processed_pages.json \
+  --output data/chunks.json \
+  --max_tokens 500
+```
+
+### Step 3: Generate embeddings
+
+```bash
+python src/embedding/embedder.py \
+  --input data/chunks.json \
+  --output data/chunks_with_emb.json \
+  --model all-MiniLM-L6-v2
+```
+
+### Step 4: Build semantic graph
+
+```bash
+python src/graph/builder.py \
+  --input data/chunks_with_emb.json \
+  --output data/graph.graphml \
+  --threshold 0.7
+```
+
+---
+
+## Running the Chatbot
+
+```bash
+python src/api/app.py --top_k 5 --hops 1
+```
+
+**Parameters:**
+- `--top_k`: Number of initial chunks to retrieve (default: 5)
+- `--hops`: Graph hops for context expansion (default: 1)
+- `--chunks`: Custom path to chunks JSON
+- `--graph`: Custom path to graph file
+- `--metadata`: Custom path to metadata JSON
+
+**Example session:**
+```
+Microbiome RAG Chatbot CLI (type 'exit' to quit)
+
+Enter your question: What role do gut bacteria play in digestion?
+
+=== Answer (based on 'Microbiome Research' DOI: 10.1234/example) ===
+Gut bacteria play a crucial role in digestion by... [^1] [^2]
+
+=== Citations ===
+[^1] Title: Microbiome Research, DOI: 10.1234/example, Page 3, Para 2, Chunk 1
+[^2] Title: Microbiome Research, DOI: 10.1234/example, Page 5, Para 1, Chunk 1
+```
+
+---
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHUNKS_PATH` | `data/chunks.json` | Path to chunks JSON |
+| `GRAPH_PATH` | `data/graph.graphml` | Path to graph file |
+| `GRAPH_FORMAT` | `graphml` | Graph format (graphml or gexf) |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | SentenceTransformers model |
+| `METADATA_PATH` | `data/processed_pages.json` | Path to PDF metadata |
+| `LLM_MODEL` | `llama3` | Ollama model name |
+| `LOG_LEVEL` | `INFO` | Logging level |
+
+---
+
+## Running Tests
+
+```bash
+# Install test dependencies
+pip install pytest pytest-cov
+
+# Run all tests
+pytest tests/ -v
+
+# Run with coverage
+pytest tests/ --cov=src --cov-report=html
+```
+
+---
+
+## Programmatic Usage
+
+```python
+from src.api.app import RAGChatbot
+
+# Create chatbot instance
+chatbot = RAGChatbot(
+    chunks_path="data/chunks_with_emb.json",
+    graph_path="data/graph.graphml"
+)
+
+# Query
+answer = chatbot.process_query(
+    "What is the role of probiotics?",
+    top_k=5,
+    hops=1
+)
+```
 
 ---
 
 ## Troubleshooting
 
-* **ModuleNotFoundError**: Ensure you run Python from the repo root (or adjust `PYTHONPATH`), e.g.:
+### ModuleNotFoundError
+Run from the repository root or use the module syntax:
+```bash
+PYTHONPATH=. python src/api/app.py
+# or
+python -m src.api.app
+```
 
-  ```bash
-  python -m src.cli
-  ```
+### Ollama Connection Error
+Ensure Ollama is running:
+```bash
+ollama serve  # Start the service
+ollama list   # Verify models are available
+```
 
-* **Spacing issues**: The pipeline uses `pdfminer.six` exclusively for text extraction, splitting on form-feed (`\f`). Ensure no remnants of two-column code remain.
+### Empty or Poor Results
+- Increase `--top_k` to retrieve more context
+- Decrease similarity threshold in graph building
+- Ensure PDF text was extracted correctly (check `processed_pages.json`)
 
-* **Ollama errors**: Verify `ollama` daemon is running and `llama3` is pulled:
+---
 
-  ```bash
-  ollama list
-  ```
+## Security Notes
+
+- PDF text is sanitized before LLM prompts to prevent prompt injection
+- File paths are validated to prevent path traversal
+- Input parameters are validated before processing
 
 ---
 
 ## Future Enhancements
 
-* FastAPI / HTTP endpoint
-* FAISS or Pinecone integration
-* Figure / table parsing
-* Streaming answers
-* API key protection
+- [ ] FastAPI HTTP endpoints
+- [ ] FAISS/Pinecone vector store integration
+- [ ] Figure and table extraction
+- [ ] Streaming LLM responses
+- [ ] Multi-document support
+- [ ] Web UI
 
 ---
 
-*Version 1.0*
+## License
+
+MIT License
+
+---
+
+*Version 2.0 - Updated with security fixes and test suite*
