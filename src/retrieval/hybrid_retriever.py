@@ -1,12 +1,16 @@
-"""Postgres-backed (pgContext + pgGraph) RAG retriever.
+"""Hybrid (Postgres + DuckDB) RAG retriever.
+
+Postgres+pgGraph store chunk text/metadata and graph structure; DuckDB+vss
+stores embeddings and answers nearest-neighbor search. See
+docs/superpowers/specs/2026-08-02-duckdb-vector-search-design.md.
 
 Owns a private background thread and event loop so its synchronous
-retrieve() can be called safely from anywhere — including from inside an
-already-running event loop (FastAPI request handlers) — without the
+retrieve() can be called safely from anywhere -- including from inside an
+already-running event loop (FastAPI request handlers) -- without the
 "event loop is already running" failure asyncio.run()/run_until_complete()
 would hit there. asyncpg pools are bound to the loop that created them, so
 the pool is created eagerly, synchronously, on that same private loop
-during __init__ — never lazily and never on the caller's loop. Eager
+during __init__ -- never lazily and never on the caller's loop. Eager
 creation also avoids a check-then-act race where concurrent first callers
 could each see no pool yet and each create (and leak) their own.
 """
@@ -19,16 +23,12 @@ import asyncpg
 
 from ..chunking import Chunk
 from ..embedding import VLLMEmbedder
+from ..graph.duckdb_store import DuckDBStore
 from ..utils import get_logger, get_settings
 from .base import BaseRetriever, RetrievalResult
 
 logger = get_logger(__name__)
 settings = get_settings()
-
-
-def _embedding_to_vector_literal(embedding: list[float]) -> str:
-    """Format a Python float list as a pgcontext.vector text literal."""
-    return "[" + ",".join(repr(x) for x in embedding) + "]"
 
 
 def _row_to_chunk(row: asyncpg.Record) -> Chunk:
@@ -41,23 +41,26 @@ def _row_to_chunk(row: asyncpg.Record) -> Chunk:
     )
 
 
-class PostgresRetriever(BaseRetriever):
+class HybridRetriever(BaseRetriever):
     """
-    Postgres-backed RAG retriever.
+    Hybrid Postgres+DuckDB RAG retriever.
 
-    Finds nearest chunks via pgContext's persisted HNSW index and expands
-    context via pgGraph's graph.expand(), replacing the file-backed
+    Finds nearest chunks via DuckDB's HNSW index, fetches their text from
+    Postgres, and expands context via pgGraph's graph.expand() (rescoring
+    newly-discovered neighbors via DuckDB), replacing the file-backed
     GraphRAGRetriever's brute-force scan and NetworkX traversal.
     """
 
     def __init__(
         self,
         dsn: Optional[str] = None,
+        duckdb_store: Optional[DuckDBStore] = None,
         embedder: Optional[VLLMEmbedder] = None,
         top_k: int = 5,
         graph_hops: int = 1,
     ):
         self.dsn = dsn or settings.postgres.dsn
+        self.duckdb_store = duckdb_store or DuckDBStore(str(settings.ingestion.duckdb_path))
         self.embedder = embedder or VLLMEmbedder()
         self.top_k = top_k
         self.graph_hops = graph_hops
@@ -67,11 +70,7 @@ class PostgresRetriever(BaseRetriever):
         self._loop_thread.start()
 
         # Create the pool eagerly and synchronously, before any retrieve()
-        # call can race on it — this replaces a lazy check-then-act init
-        # that had an unguarded race between concurrent callers
-        # (asyncpg.create_pool() yields control during connection setup, so
-        # two concurrent first-callers could both see no pool yet and both
-        # create one, leaking the loser).
+        # call can race on it -- see module docstring.
         self._pool: asyncpg.Pool = self._run(self._create_pool())
 
     def _run(self, coro):
@@ -98,7 +97,8 @@ class PostgresRetriever(BaseRetriever):
 
     def close(self) -> None:
         """Close the pool and stop the private event loop. Call once, at
-        shutdown."""
+        shutdown. Does NOT close self.duckdb_store -- its lifecycle is
+        owned by whoever constructed/passed it in."""
         self._run(self._pool.close())
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._loop_thread.join(timeout=5)
@@ -121,24 +121,24 @@ class PostgresRetriever(BaseRetriever):
             logger.error(f"Embedding generation failed: {e}")
             return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
 
-        vector_literal = _embedding_to_vector_literal(query_embedding)
-        pool = self._pool
+        neighbor_pairs = self.duckdb_store.search(query_embedding, top_k=top_k)
+        ordered_ids = [nid for nid, _ in neighbor_pairs]
+        score_by_id = dict(neighbor_pairs)
 
+        pool = self._pool
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, paper_doi, text, section, token_count,
-                       1 - (embedding OPERATOR(pgcontext.<=>) $1::pgcontext.vector) AS similarity
+                SELECT id, paper_doi, text, section, token_count
                 FROM chunks
-                ORDER BY embedding OPERATOR(pgcontext.<=>) $1::pgcontext.vector
-                LIMIT $2
+                WHERE id = ANY($1::text[])
                 """,
-                vector_literal,
-                top_k,
+                ordered_ids,
             )
+            rows_by_id = {r["id"]: r for r in rows}
 
-            chunks = [_row_to_chunk(r) for r in rows]
-            scores = [float(r["similarity"]) for r in rows]
+            chunks = [_row_to_chunk(rows_by_id[nid]) for nid in ordered_ids if nid in rows_by_id]
+            scores = [score_by_id[c.id] for c in chunks]
 
             if expand_context and self.graph_hops > 0 and chunks:
                 neighbor_ids = set()
@@ -164,16 +164,32 @@ class PostgresRetriever(BaseRetriever):
                 if new_ids:
                     neighbor_rows = await conn.fetch(
                         """
-                        SELECT id, paper_doi, text, section, token_count,
-                               1 - (embedding OPERATOR(pgcontext.<=>) $1::pgcontext.vector) AS similarity
+                        SELECT id, paper_doi, text, section, token_count
                         FROM chunks
-                        WHERE id = ANY($2::text[])
+                        WHERE id = ANY($1::text[])
                         """,
-                        vector_literal,
                         list(new_ids),
                     )
-                    chunks.extend(_row_to_chunk(r) for r in neighbor_rows)
-                    scores.extend(float(r["similarity"]) for r in neighbor_rows)
+                    neighbor_embeddings = self.duckdb_store.get_embeddings(list(new_ids))
+                    query_vec = query_embedding
+
+                    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+                        dot = sum(x * y for x, y in zip(a, b))
+                        norm_a = sum(x * x for x in a) ** 0.5
+                        norm_b = sum(y * y for y in b) ** 0.5
+                        if norm_a == 0 or norm_b == 0:
+                            return 0.0
+                        return dot / (norm_a * norm_b)
+
+                    for r in neighbor_rows:
+                        chunks.append(_row_to_chunk(r))
+                        neighbor_embedding = neighbor_embeddings.get(r["id"])
+                        score = (
+                            _cosine_similarity(query_vec, neighbor_embedding)
+                            if neighbor_embedding
+                            else 0.0
+                        )
+                        scores.append(score)
 
                 sorted_pairs = sorted(
                     zip(chunks, scores), key=lambda x: x[1], reverse=True

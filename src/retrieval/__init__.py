@@ -1,14 +1,14 @@
 """Retrieval modules for RAG."""
 
 from .base import BaseRetriever, Citation, RAGResponse, RetrievalResult
-from .postgres_retriever import PostgresRetriever
+from .hybrid_retriever import HybridRetriever
 from .retriever import GraphRAGRetriever, RAGEngine
 
 __all__ = [
     "BaseRetriever",
     "Citation",
     "GraphRAGRetriever",
-    "PostgresRetriever",
+    "HybridRetriever",
     "RAGEngine",
     "RAGResponse",
     "RetrievalResult",
