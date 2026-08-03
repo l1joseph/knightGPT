@@ -133,6 +133,10 @@ class IngestionSettings(BaseSettings):
         default=Path("data/processed"),
         description="Directory for processed data",
     )
+    duckdb_path: Path = Field(
+        default=Path("data/processed/embeddings.duckdb"),
+        description="Path to the DuckDB vector-search database file",
+    )
     force_ocr: bool = Field(
         default=False,
         description="Force OCR for all PDFs",
