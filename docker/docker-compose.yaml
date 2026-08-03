@@ -1,7 +1,9 @@
 version: "3.8"
 
 # KnightGPT Full Stack Deployment
-# Includes: API Server, Open WebUI, Postgres (pgGraph + pgContext)
+# Includes: API Server, Open WebUI, Postgres (pgGraph), embedded DuckDB
+# (vector search, kept separate from Postgres -- see
+# docs/superpowers/specs/2026-08-02-duckdb-vector-search-design.md)
 # For deployment at knight-lab-dev.org
 
 services:
@@ -20,9 +22,15 @@ services:
       - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL:-Alibaba-NLP/gte-Qwen2-7B-instruct}
       - VLLM_INFERENCE_MODEL=${VLLM_INFERENCE_MODEL:-meta-llama/Llama-3.3-70B-Instruct}
       - POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD:-password}@postgres:5432/knightgpt
+      # DuckDB opens this file read-write (embedded, in-process vector
+      # store -- see src/graph/duckdb_store.py) and cannot live under the
+      # read-only ../data mount below, so it gets its own read-write
+      # volume instead.
+      - INGEST_DUCKDB_PATH=/app/duckdb_data/embeddings.duckdb
       - LOG_LEVEL=INFO
     volumes:
       - ../data:/app/data:ro
+      - duckdb-data:/app/duckdb_data
       - api-logs:/app/logs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -62,7 +70,7 @@ services:
     depends_on:
       - api
 
-  # Postgres + pgGraph + pgContext
+  # Postgres + pgGraph
   postgres:
     build:
       context: ..
@@ -116,6 +124,7 @@ services:
 volumes:
   api-logs:
   open-webui-data:
+  duckdb-data:
 
 networks:
   knightgpt-net:

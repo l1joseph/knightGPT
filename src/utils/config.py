@@ -135,7 +135,13 @@ class IngestionSettings(BaseSettings):
     )
     duckdb_path: Path = Field(
         default=Path("data/processed/embeddings.duckdb"),
-        description="Path to the DuckDB vector-search database file",
+        description=(
+            "Path to the DuckDB vector-search database file. Keep this in "
+            "sync with processed_dir in deployment env files -- it is not "
+            "automatically derived from processed_dir when INGEST_DUCKDB_PATH "
+            "is set explicitly, only when duckdb_path is left at its default "
+            "and processed_dir is customized (see model_post_init below)."
+        ),
     )
     force_ocr: bool = Field(
         default=False,
@@ -151,6 +157,25 @@ class IngestionSettings(BaseSettings):
         env_file=".env",
         extra="ignore",
     )
+
+    def model_post_init(self, __context) -> None:
+        """If processed_dir was customized but duckdb_path was left at its
+        class-level default, re-derive duckdb_path from processed_dir
+        instead of silently keeping a stale CWD-relative default. Without
+        this, a deployment that sets INGEST_PROCESSED_DIR (e.g. to a
+        scratch path) but forgets to also set INGEST_DUCKDB_PATH gets a
+        fresh, empty, CWD-relative DuckDB file with no error -- the only
+        symptom is every search silently returning zero results, since
+        chunks exist in Postgres but DuckDB has nothing. If duckdb_path was
+        set explicitly (e.g. via INGEST_DUCKDB_PATH), that explicit value
+        always wins and is left untouched."""
+        default_processed_dir = self.model_fields["processed_dir"].default
+        default_duckdb_path = self.model_fields["duckdb_path"].default
+        if (
+            self.processed_dir != default_processed_dir
+            and self.duckdb_path == default_duckdb_path
+        ):
+            self.duckdb_path = self.processed_dir / "embeddings.duckdb"
 
 
 class RSSSettings(BaseSettings):
@@ -241,6 +266,7 @@ class Settings(BaseSettings):
     def slurm_node(self) -> Optional[str]:
         """Get current SLURM node hostname from environment."""
         import os
+
         return os.environ.get("SLURM_NODELIST") or os.environ.get("SLURMD_NODENAME")
 
     def get_vllm_url(self, service: str = "embedding") -> str:
@@ -250,7 +276,11 @@ class Settings(BaseSettings):
         If SLURM_NODELIST is set and the URL is localhost, replace
         with the actual compute node hostname.
         """
-        url = self.vllm.embedding_url if service == "embedding" else self.vllm.inference_url
+        url = (
+            self.vllm.embedding_url
+            if service == "embedding"
+            else self.vllm.inference_url
+        )
         node = self.slurm_node
         if node and "localhost" in url:
             url = url.replace("localhost", node)

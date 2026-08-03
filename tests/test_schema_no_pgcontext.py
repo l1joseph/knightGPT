@@ -31,7 +31,9 @@ def test_schema_sql_still_registers_pggraph():
 
 @pytest.mark.unit
 def test_init_sql_has_no_pgcontext():
-    text = (REPO_ROOT / "docker" / "postgres" / "init" / "01-create-extensions.sql").read_text()
+    text = (
+        REPO_ROOT / "docker" / "postgres" / "init" / "01-create-extensions.sql"
+    ).read_text()
     assert "pgcontext" not in text.lower()
     assert "graph" in text.lower()
 

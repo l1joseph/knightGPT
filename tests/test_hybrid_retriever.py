@@ -38,8 +38,20 @@ def test_retrieve_returns_nearest_chunks_from_duckdb(tmp_path):
     store.ensure_index()
 
     chunk_rows = [
-        {"id": "c1", "paper_doi": "10.1/x", "text": "chunk one", "section": "Intro", "token_count": 5},
-        {"id": "c2", "paper_doi": "10.1/x", "text": "chunk two", "section": "Methods", "token_count": 6},
+        {
+            "id": "c1",
+            "paper_doi": "10.1/x",
+            "text": "chunk one",
+            "section": "Intro",
+            "token_count": 5,
+        },
+        {
+            "id": "c2",
+            "paper_doi": "10.1/x",
+            "text": "chunk two",
+            "section": "Methods",
+            "token_count": 6,
+        },
     ]
     pool, conn = make_mock_pool([chunk_rows])
     embedder = MagicMock()
@@ -77,7 +89,9 @@ def test_retrieve_empty_query_returns_empty_result(tmp_path):
         "src.retrieval.hybrid_retriever.asyncpg.create_pool",
         new=AsyncMock(return_value=pool),
     ):
-        retriever = HybridRetriever(dsn="postgresql://test", duckdb_store=store, embedder=embedder)
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
         result = retriever.retrieve("   ")
         retriever.close()
     store.close()
@@ -103,11 +117,23 @@ def test_retrieve_expands_via_pggraph_and_rescores_via_duckdb(tmp_path):
     store.ensure_index()
 
     chunk_rows = [
-        {"id": "c1", "paper_doi": "10.1/x", "text": "chunk one", "section": "Intro", "token_count": 5},
+        {
+            "id": "c1",
+            "paper_doi": "10.1/x",
+            "text": "chunk one",
+            "section": "Intro",
+            "token_count": 5,
+        },
     ]
     expand_rows = [{"node_id": "neighbor1"}]
     neighbor_chunk_rows = [
-        {"id": "neighbor1", "paper_doi": "10.1/x", "text": "chunk two", "section": "Methods", "token_count": 6},
+        {
+            "id": "neighbor1",
+            "paper_doi": "10.1/x",
+            "text": "chunk two",
+            "section": "Methods",
+            "token_count": 6,
+        },
     ]
     pool, conn = make_mock_pool([chunk_rows, expand_rows, neighbor_chunk_rows])
     embedder = MagicMock()
@@ -118,7 +144,11 @@ def test_retrieve_expands_via_pggraph_and_rescores_via_duckdb(tmp_path):
         new=AsyncMock(return_value=pool),
     ):
         retriever = HybridRetriever(
-            dsn="postgresql://test", duckdb_store=store, embedder=embedder, top_k=1, graph_hops=1
+            dsn="postgresql://test",
+            duckdb_store=store,
+            embedder=embedder,
+            top_k=1,
+            graph_hops=1,
         )
         result = retriever.retrieve("query", expand_context=True)
         retriever.close()
@@ -147,7 +177,9 @@ def test_pool_created_exactly_once_at_construction(tmp_path):
         "src.retrieval.hybrid_retriever.asyncpg.create_pool",
         new=mock_create_pool,
     ):
-        retriever = HybridRetriever(dsn="postgresql://test", duckdb_store=store, embedder=embedder)
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
         assert mock_create_pool.call_count == 1
 
         retriever.retrieve("query one", expand_context=False)
@@ -180,7 +212,9 @@ def test_retrieve_callable_from_inside_a_running_event_loop(tmp_path):
             "src.retrieval.hybrid_retriever.asyncpg.create_pool",
             new=AsyncMock(return_value=pool),
         ):
-            retriever = HybridRetriever(dsn="postgresql://test", duckdb_store=store, embedder=embedder)
+            retriever = HybridRetriever(
+                dsn="postgresql://test", duckdb_store=store, embedder=embedder
+            )
             result = retriever.retrieve("query", expand_context=False)
             retriever.close()
             return result

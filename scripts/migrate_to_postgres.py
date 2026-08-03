@@ -76,63 +76,70 @@ async def migrate(
             "dry_run": True,
         }
 
+    # store and conn are each acquired and closed in their own try/finally
+    # (nested, not sibling) so that a failure acquiring or using either one
+    # never leaks the other: if asyncpg.connect() raises, store.close()
+    # still runs via the outer finally; if closing conn raises, the outer
+    # finally still runs afterward and closes store.
     store = DuckDBStore(str(duckdb_path))
-    conn = await asyncpg.connect(dsn)
     try:
-        for doi, source_file in papers_seen.items():
-            await conn.execute(
-                """
-                INSERT INTO papers (doi, title, metadata)
-                VALUES ($1, $2, '{}'::jsonb)
-                ON CONFLICT (doi) DO NOTHING
-                """,
-                doi,
-                Path(source_file).stem,
-            )
+        conn = await asyncpg.connect(dsn)
+        try:
+            for doi, source_file in papers_seen.items():
+                await conn.execute(
+                    """
+                    INSERT INTO papers (doi, title, metadata)
+                    VALUES ($1, $2, '{}'::jsonb)
+                    ON CONFLICT (doi) DO NOTHING
+                    """,
+                    doi,
+                    Path(source_file).stem,
+                )
 
-        chunks_migrated = 0
-        for chunk in chunks:
-            if not chunk.embedding:
-                logger.warning(f"Chunk {chunk.id} has no embedding, skipping")
-                continue
-            paper_doi = (
-                _resolve_doi(chunk.source_file, doi_lookup)
-                if chunk.source_file
-                else None
-            )
-            await conn.execute(
-                """
-                INSERT INTO chunks (id, paper_doi, text, section, token_count)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                chunk.id,
-                paper_doi,
-                chunk.text,
-                chunk.section,
-                chunk.token_count,
-            )
-            chunks_migrated += 1
+            chunks_migrated = 0
+            for chunk in chunks:
+                if not chunk.embedding:
+                    logger.warning(f"Chunk {chunk.id} has no embedding, skipping")
+                    continue
+                paper_doi = (
+                    _resolve_doi(chunk.source_file, doi_lookup)
+                    if chunk.source_file
+                    else None
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO chunks (id, paper_doi, text, section, token_count)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    chunk.id,
+                    paper_doi,
+                    chunk.text,
+                    chunk.section,
+                    chunk.token_count,
+                )
+                chunks_migrated += 1
 
-        embeddable_chunks = [c for c in chunks if c.embedding]
-        store.insert_embeddings([(c.id, c.embedding) for c in embeddable_chunks])
-        store.ensure_index()
+            embeddable_chunks = [c for c in chunks if c.embedding]
+            store.insert_embeddings([(c.id, c.embedding) for c in embeddable_chunks])
+            store.ensure_index()
 
-        edges_migrated = 0
-        if edges:
-            await conn.executemany(
-                """
-                INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
-                """,
-                edges,
-            )
-            edges_migrated = len(edges)
+            edges_migrated = 0
+            if edges:
+                await conn.executemany(
+                    """
+                    INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
+                    """,
+                    edges,
+                )
+                edges_migrated = len(edges)
 
-        await conn.execute("SELECT * FROM graph.build()")
+            await conn.execute("SELECT * FROM graph.build()")
+        finally:
+            await conn.close()
     finally:
-        await conn.close()
         store.close()
 
     return {

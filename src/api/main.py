@@ -1,5 +1,6 @@
 """FastAPI application for KnightGPT RAG API."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
     # event loop (e.g. /api/v1/search), which this loop's own pool can't
     # support.
     _pool = await get_pg_pool()
+    logger.info(f"DuckDB store: {settings.ingestion.duckdb_path.resolve()}")
     _duckdb_store = DuckDBStore(str(settings.ingestion.duckdb_path))
     _retriever = HybridRetriever(duckdb_store=_duckdb_store)
     _rag_engine = RAGEngine(retriever=_retriever)
@@ -117,7 +119,7 @@ class SearchRequest(BaseModel):
     """Semantic search request."""
 
     query: str
-    top_k: int = Field(default=10)
+    top_k: int = Field(default=10, ge=1, le=100)
     expand_context: bool = Field(default=True)
 
 
@@ -139,6 +141,7 @@ class HealthResponse(BaseModel):
     inference_server: bool
     chunks_loaded: int
     graph_nodes: int
+    chunk_embeddings_count: int
 
 
 def get_rag_engine() -> RAGEngine:
@@ -195,6 +198,14 @@ async def health_check():
             graph_status = await conn.fetchrow("SELECT node_count FROM graph.status()")
             graph_nodes = graph_status["node_count"] if graph_status else 0
 
+    chunk_embeddings_count = 0
+    if _duckdb_store is not None:
+        # Dispatched via asyncio.to_thread -- see postgres_builder.py's
+        # comment on why synchronous DuckDB calls shouldn't block the
+        # event loop, and duckdb_store.py's comment on why every DuckDB
+        # call is serialized behind DuckDBStore's internal lock.
+        chunk_embeddings_count = await asyncio.to_thread(_duckdb_store.count)
+
     status = "healthy" if embedding_healthy and inference_healthy else "degraded"
 
     return HealthResponse(
@@ -203,6 +214,7 @@ async def health_check():
         inference_server=inference_healthy,
         chunks_loaded=chunks_count,
         graph_nodes=graph_nodes,
+        chunk_embeddings_count=chunk_embeddings_count,
     )
 
 

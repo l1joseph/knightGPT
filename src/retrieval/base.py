@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 # DOIs always start with the "10." directory indicator followed by a
 # registrant code and a slash (https://www.doi.org/doi_handbook/2_Numbering.html).
-# PostgresRetriever sets Chunk.source_file to the paper's real DOI (e.g.
+# HybridRetriever sets Chunk.source_file to the paper's real DOI (e.g.
 # "10.1128/mbio.00519-19"); the file-backed retriever sets it to a markdown
 # path. Running a DOI through Path(...).stem mangles it badly -- Path
 # treats "/" as a separator and "." as an extension marker, so

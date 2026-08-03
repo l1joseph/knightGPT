@@ -2,6 +2,7 @@
 into DuckDB, and build similarity edges via DuckDB's HNSW-accelerated
 nearest-neighbor search."""
 
+import asyncio
 import json
 
 import asyncpg
@@ -114,14 +115,25 @@ async def insert_chunks(
             inserted_chunks.append(chunk)
 
         # Phase 2: bulk-insert embeddings into DuckDB, only for chunks whose
-        # Postgres row is now guaranteed to exist.
-        duckdb_store.insert_embeddings([(c.id, c.embedding) for c in inserted_chunks])
-        duckdb_store.ensure_index()
+        # Postgres row is now guaranteed to exist. Dispatched via
+        # asyncio.to_thread so these synchronous DuckDB calls (each
+        # holding DuckDBStore's internal lock -- see duckdb_store.py) don't
+        # block the event loop this coroutine runs on, which matters when
+        # this runs as a FastAPI background task on the main event loop
+        # (see src/api/main.py's /api/v1/ingest) alongside other requests,
+        # including health checks.
+        await asyncio.to_thread(
+            duckdb_store.insert_embeddings,
+            [(c.id, c.embedding) for c in inserted_chunks],
+        )
+        await asyncio.to_thread(duckdb_store.ensure_index)
 
         # Phase 3: neighbor search + edges, now that every inserted chunk's
         # embedding is queryable in DuckDB.
         for chunk in inserted_chunks:
-            neighbors = duckdb_store.search(chunk.embedding, top_k=max_neighbors + 1)
+            neighbors = await asyncio.to_thread(
+                duckdb_store.search, chunk.embedding, top_k=max_neighbors + 1
+            )
 
             # The neighbor search can return the chunk itself (distance 0 /
             # similarity 1.0); exclude it before capping.

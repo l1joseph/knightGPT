@@ -60,7 +60,9 @@ class HybridRetriever(BaseRetriever):
         graph_hops: int = 1,
     ):
         self.dsn = dsn or settings.postgres.dsn
-        self.duckdb_store = duckdb_store or DuckDBStore(str(settings.ingestion.duckdb_path))
+        self.duckdb_store = duckdb_store or DuckDBStore(
+            str(settings.ingestion.duckdb_path)
+        )
         self.embedder = embedder or VLLMEmbedder()
         self.top_k = top_k
         self.graph_hops = graph_hops
@@ -137,7 +139,11 @@ class HybridRetriever(BaseRetriever):
             )
             rows_by_id = {r["id"]: r for r in rows}
 
-            chunks = [_row_to_chunk(rows_by_id[nid]) for nid in ordered_ids if nid in rows_by_id]
+            chunks = [
+                _row_to_chunk(rows_by_id[nid])
+                for nid in ordered_ids
+                if nid in rows_by_id
+            ]
             scores = [score_by_id[c.id] for c in chunks]
 
             if expand_context and self.graph_hops > 0 and chunks:
@@ -170,7 +176,9 @@ class HybridRetriever(BaseRetriever):
                         """,
                         list(new_ids),
                     )
-                    neighbor_embeddings = self.duckdb_store.get_embeddings(list(new_ids))
+                    neighbor_embeddings = self.duckdb_store.get_embeddings(
+                        list(new_ids)
+                    )
                     query_vec = query_embedding
 
                     def _cosine_similarity(a: list[float], b: list[float]) -> float:

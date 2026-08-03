@@ -40,7 +40,9 @@ async def test_insert_chunks_filters_below_threshold_neighbors(tmp_path):
     )
     store.ensure_index()
 
-    chunk = Chunk(id="new1", text="hello", source_file="p.md", embedding=[0.99, 0.01, 0.0, 0.0])
+    chunk = Chunk(
+        id="new1", text="hello", source_file="p.md", embedding=[0.99, 0.01, 0.0, 0.0]
+    )
     papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
 
     pool, conn = make_mock_pool()
@@ -51,7 +53,9 @@ async def test_insert_chunks_filters_below_threshold_neighbors(tmp_path):
     store.close()
 
     edge_calls = [
-        call for call in conn.executemany.call_args_list if "chunk_edges" in call.args[0]
+        call
+        for call in conn.executemany.call_args_list
+        if "chunk_edges" in call.args[0]
     ]
     assert len(edge_calls) == 1
     inserted_edges = edge_calls[0].args[1]
@@ -73,7 +77,9 @@ async def test_insert_chunks_caps_at_max_neighbors(tmp_path):
     )
     store.ensure_index()
 
-    chunk = Chunk(id="new1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0])
+    chunk = Chunk(
+        id="new1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0]
+    )
     papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
 
     pool, conn = make_mock_pool()
@@ -95,15 +101,20 @@ async def test_insert_chunks_writes_embedding_to_duckdb_not_postgres(tmp_path):
     from src.graph.postgres_builder import insert_chunks
 
     store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
-    chunk = Chunk(id="new1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0])
+    chunk = Chunk(
+        id="new1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0]
+    )
     papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
 
     pool, conn = make_mock_pool()
 
-    await insert_chunks(pool, [chunk], papers, store, similarity_threshold=0.7, max_neighbors=10)
+    await insert_chunks(
+        pool, [chunk], papers, store, similarity_threshold=0.7, max_neighbors=10
+    )
 
     chunks_insert_calls = [
-        call for call in conn.execute.call_args_list
+        call
+        for call in conn.execute.call_args_list
         if call.args and "INSERT INTO chunks" in call.args[0]
     ]
     assert len(chunks_insert_calls) == 1

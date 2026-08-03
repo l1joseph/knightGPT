@@ -35,7 +35,7 @@ class TestGraphRAGRetriever:
         assert context == ""
 
     def test_format_context_uses_doi_directly_for_doi_shaped_source_file(self):
-        """PostgresRetriever sets Chunk.source_file to the paper's real DOI
+        """HybridRetriever sets Chunk.source_file to the paper's real DOI
         (e.g. "10.1128/mbio.00519-19"). Running that through Path(...).stem
         mangles it (Path treats "/" as a separator and "." as an extension
         marker), so format_context must detect DOI-shaped source_file
