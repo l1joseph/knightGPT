@@ -113,7 +113,9 @@ async def test_migrate_preserves_chunk_and_edge_counts(tmp_path):
         graph_path = tmp_path / "graph.graphml"
         nx.write_graphml(graph, str(graph_path))
 
-        result = await migrate(DSN, chunks_path, graph_path, tmp_path / "test.duckdb", dry_run=False)
+        result = await migrate(
+            DSN, chunks_path, graph_path, tmp_path / "test.duckdb", dry_run=False
+        )
 
         chunk_count = await conn.fetchval("SELECT count(*) FROM chunks")
         edge_count = await conn.fetchval("SELECT count(*) FROM chunk_edges")

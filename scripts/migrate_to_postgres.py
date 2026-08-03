@@ -90,10 +90,6 @@ async def migrate(
                 Path(source_file).stem,
             )
 
-        embeddable_chunks = [c for c in chunks if c.embedding]
-        store.insert_embeddings([(c.id, c.embedding) for c in embeddable_chunks])
-        store.ensure_index()
-
         chunks_migrated = 0
         for chunk in chunks:
             if not chunk.embedding:
@@ -117,6 +113,10 @@ async def migrate(
                 chunk.token_count,
             )
             chunks_migrated += 1
+
+        embeddable_chunks = [c for c in chunks if c.embedding]
+        store.insert_embeddings([(c.id, c.embedding) for c in embeddable_chunks])
+        store.ensure_index()
 
         edges_migrated = 0
         if edges:
