@@ -1,0 +1,26 @@
+# k8s/nrp/duckdb-verify-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: duckdb-verify
+  namespace: knightlab-ml
+spec:
+  restartPolicy: Never
+  containers:
+    - name: verify
+      image: python:3.11-slim
+      command: ["sleep", "600"]
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+      volumeMounts:
+        - name: duckdb-data
+          mountPath: /data
+  volumes:
+    - name: duckdb-data
+      persistentVolumeClaim:
+        claimName: knightgpt-duckdb

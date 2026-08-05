@@ -1,0 +1,13 @@
+# k8s/nrp/duckdb-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: knightgpt-duckdb
+  namespace: knightlab-ml
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: rook-cephfs
+  resources:
+    requests:
+      storage: 20Gi
