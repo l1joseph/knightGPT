@@ -84,7 +84,31 @@ spec:
                 # connections (e.g. HybridRetriever's pool) to disconnect on their own -- with
                 # nothing forcing that, kubelet would eventually SIGKILL at the
                 # terminationGracePeriodSeconds deadline instead of a clean shutdown.
-                command: ["/bin/sh", "-c", "pg_ctl -D \"$PGDATA\" -m fast -w stop"]
+                # lifecycle hooks run as the container's process user, which is root (this
+                # image's entrypoint runs as root and only gosu-drops privilege for the
+                # postmaster itself) -- pg_ctl refuses to run as root, so this must be run via
+                # gosu postgres, same as docker-entrypoint.sh does internally. Confirmed
+                # gosu is present at /usr/local/bin/gosu in this image.
+                #
+                # NOTE (tested 2026-08-05): kubelet still logs a `FailedPreStopHook` event on
+                # every termination even with this gosu fix, both with and without `-w`. This
+                # is a separate, structural artifact, not a functional failure: postgres is
+                # this container's PID 1 (no init/supervisor process), so the moment this
+                # hook's SIGINT reaches it and it begins exiting, the container's process
+                # namespace is torn down -- which kills the hook's own exec session as
+                # collateral before it can report success back to kubelet, even though the
+                # fast shutdown it triggered completes correctly. Confirmed via the
+                # container's own postgres logs after a manual trigger: "received fast
+                # shutdown request" -> checkpoint -> "database system is shut down" -- a
+                # fully clean sequence -- and via repeated pod-deletion tests where the
+                # `FailedPreStopHook` event fires within ~1s of the `Killing` event, not
+                # after the 60s terminationGracePeriodSeconds (which would indicate a real
+                # fallback to SIGKILL). Eliminating the event entirely would require an
+                # init/supervisor process (e.g. tini) ahead of postgres as PID 1 in
+                # docker/postgres/Dockerfile -- a separate, Dockerfile-level change, out of
+                # scope here. -w is kept because it gives a synchronous confirmation
+                # semantics if a future, slower shutdown scenario arises.
+                command: ["/bin/sh", "-c", "gosu postgres pg_ctl -D \"$PGDATA\" -m fast -w stop"]
           readinessProbe:
             # Closes a real, measured gap: without this, the Service routes traffic to a pod
             # that's Running but not yet accepting connections (~42s window observed after pod

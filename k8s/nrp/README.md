@@ -46,21 +46,27 @@ matter for any pod that needs to read/write knightGPT's storage:
 
 ### The `INGEST_DUCKDB_PATH` trap — read this before deploying anything
 
-`IngestionSettings.model_post_init` (see `src/utils/config.py`) only re-derives
-`duckdb_path` from `processed_dir` when `duckdb_path` is left at its **class-level
-default** and `processed_dir` is customized. If a future Deployment/Job sets
-**`INGEST_PROCESSED_DIR`** (e.g. to a PVC mount path) **without also setting
-`INGEST_DUCKDB_PATH`**, the derivation does not kick in for the DuckDB path in the way
-you'd expect for a directly-set `INGEST_DUCKDB_PATH` — and more importantly, if
-`INGEST_DUCKDB_PATH` is left completely unset, `duckdb_path` falls back to its
-CWD-relative default (`data/processed/embeddings.duckdb`), which almost certainly does
-**not** resolve inside the DuckDB PVC mount in a container. The result: a fresh, empty,
-wrong-path DuckDB file gets created silently, with **no error, no warning**. The only
-symptom is every future search returning zero results, because chunks exist in Postgres
-but this wrong-path DuckDB file has nothing in it.
+`IngestionSettings.model_post_init` (see `src/utils/config.py:161-178`) re-derives
+`duckdb_path` from `processed_dir` **only when `processed_dir` is customized and
+`duckdb_path` is left at its class-level default** — i.e. if a future Deployment/Job sets
+`INGEST_PROCESSED_DIR` (e.g. to a PVC mount path) without also setting
+`INGEST_DUCKDB_PATH`, the derivation *does* kick in correctly:
+`duckdb_path = processed_dir / "embeddings.duckdb"`, which resolves inside the mounted PVC
+as expected. That combination is actually safe.
 
-**Always set `INGEST_DUCKDB_PATH` explicitly** to a path inside the mounted PVC. Do not
-rely on deriving it from `INGEST_PROCESSED_DIR` alone.
+**The real trap is leaving both unset.** If neither `INGEST_PROCESSED_DIR` nor
+`INGEST_DUCKDB_PATH` is set, `processed_dir` stays at its own class-level default too, so
+the `model_post_init` condition above never fires — `duckdb_path` falls straight through to
+its own **CWD-relative** default (`data/processed/embeddings.duckdb`), which almost
+certainly does **not** resolve inside the DuckDB PVC mount in a container. The result: a
+fresh, empty, wrong-path DuckDB file gets created silently, with **no error, no warning**.
+The only symptom is every future search returning zero results, because chunks exist in
+Postgres but this wrong-path DuckDB file has nothing in it.
+
+**Always set `INGEST_DUCKDB_PATH` explicitly** to a path inside the mounted PVC, rather
+than relying on the `INGEST_PROCESSED_DIR` derivation to save you — it's a convenience for
+local/non-containerized use, not a guarantee for deployment manifests, and is one line to
+just set directly and never think about again.
 
 ## Example: a future Job/Deployment's `env:` block, wired correctly
 
@@ -78,11 +84,19 @@ spec:
         # Kubernetes expands $(POSTGRES_PASSWORD) here because it's defined earlier in
         # this same container's env list (dependent env vars) -- see
         # https://kubernetes.io/docs/tasks/inject-data-application/define-interdependent-environment-variables/
+        #
+        # CAVEAT: this only produces a valid DSN if the password contains none of
+        # @ : / # (URI-reserved characters). The Secret's password is
+        # openssl-rand-generated, so this is a real if low-probability edge case, not
+        # hypothetical -- if the current password ever happens to contain one of those
+        # characters, this interpolation breaks silently (connects to the wrong
+        # host/db, or fails to parse) and the password component needs URL-encoding
+        # first.
         - name: POSTGRES_DSN
           value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
-        # Explicit and correct: do NOT rely on INGEST_PROCESSED_DIR alone to derive this
-        # (see "the INGEST_DUCKDB_PATH trap" above) -- an omission here silently returns
-        # zero search results with no error.
+        # Set this explicitly -- don't leave it (and INGEST_PROCESSED_DIR) both unset
+        # (see "the INGEST_DUCKDB_PATH trap" above) -- that combination silently falls
+        # back to a CWD-relative default and returns zero search results with no error.
         - name: INGEST_DUCKDB_PATH
           value: "/data/embeddings.duckdb"
       volumeMounts:

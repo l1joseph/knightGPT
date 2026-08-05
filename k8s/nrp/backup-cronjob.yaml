@@ -36,7 +36,11 @@ spec:
           restartPolicy: Never
           containers:
             - name: backup
-              image: ghcr.io/l1joseph/knightgpt-postgres:latest
+              # Pinned to the same sha tag as the live Deployment (k8s/nrp/postgres-cluster.yaml)
+              # -- keep these in sync deliberately. An unplanned :latest bump on just this
+              # container could introduce a pg_dump client/server version mismatch against the
+              # sha-pinned server, silently failing weekly backups.
+              image: ghcr.io/l1joseph/knightgpt-postgres:sha-d5e0036c516074f9c9b9e863d77aa469adb783b0
               command:
                 - /bin/bash
                 - -c
