@@ -1,0 +1,89 @@
+# k8s/nrp/backup-cronjob.yaml
+#
+# Backup fallback for the NRP storage deployment (Task 5).
+#
+# VolumeSnapshotClass is not usable in this namespace: `kubectl get volumesnapshotclass`
+# returns Forbidden at the cluster scope (consistent with the RBAC gaps already hit
+# elsewhere in this plan for CloudNativePG's CRD and OperatorConfiguration). Per the
+# spec's "basic backup" decision, falling back to a weekly CronJob that runs `pg_dump`
+# against the Postgres Deployment and copies the DuckDB file, writing both to a
+# separate in-cluster PVC rather than assuming NRP pods can reach Cosmos scratch
+# (unconfirmed cross-cluster reachability -- see design spec).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: knightgpt-backup
+  namespace: knightlab-ml
+spec:
+  schedule: "0 8 * * 0"  # weekly, Sunday 08:00 UTC
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: ghcr.io/l1joseph/knightgpt-postgres:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  DATE=$(date +%Y%m%d)
+                  pg_dump -h knightgpt-postgres -U postgres -d knightgpt \
+                    -f /backup/knightgpt-postgres-${DATE}.sql
+                  # Deviation from task-5-brief.md: the brief's `cp` is unconditional, but the
+                  # DuckDB PVC (Task 3) is still empty at the time this CronJob was authored --
+                  # the ingestion Job that populates embeddings.duckdb is a separate, later plan
+                  # (see design spec Context). An unconditional `cp` would hard-fail this job
+                  # (via `set -e`) every week until that ingestion Job runs. Guard it instead so
+                  # the Postgres backup (which already has real data today) still succeeds.
+                  if [ -f /duckdb-data/embeddings.duckdb ]; then
+                    cp /duckdb-data/embeddings.duckdb /backup/knightgpt-embeddings-${DATE}.duckdb
+                  else
+                    echo "WARNING: /duckdb-data/embeddings.duckdb not found (ingestion Job likely hasn't run yet) -- skipping DuckDB copy this run"
+                  fi
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: knightgpt-postgres-credentials
+                      key: POSTGRES_PASSWORD
+              resources:  # required by this namespace's Gatekeeper admission policy
+                          # (container-must-have-limits-and-requests) -- not present in the
+                          # task brief's manifest, added per task-5-brief.md's flagged
+                          # context before `kubectl apply` was attempted.
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 1Gi
+              volumeMounts:
+                - name: duckdb-data
+                  mountPath: /duckdb-data
+                  readOnly: true
+                - name: backup-dest
+                  mountPath: /backup
+          volumes:
+            - name: duckdb-data
+              persistentVolumeClaim:
+                claimName: knightgpt-duckdb
+            - name: backup-dest
+              persistentVolumeClaim:
+                claimName: knightgpt-backup-dest
+---
+# append to k8s/nrp/backup-cronjob.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: knightgpt-backup-dest
+  namespace: knightlab-ml
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      storage: 20Gi
