@@ -1,17 +1,11 @@
 # k8s/nrp/postgres-cluster.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: knightgpt-postgres-data
-  namespace: knightlab-ml
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: linstor-igrok
-  resources:
-    requests:
-      storage: 20Gi
----
+#
+# The PersistentVolumeClaim for this Deployment lives in its own file,
+# k8s/nrp/postgres-pvc.yaml (see that file for why: `kubectl delete -f` on a
+# file containing both the PVC and the Deployment would delete the PVC too,
+# and both this PVC's storage class (linstor-igrok) and the backup dest PVC's
+# storage class have reclaimPolicy: Delete -- irreversible data loss).
+# Apply both files together: `kubectl apply -f k8s/nrp/postgres-pvc.yaml -f k8s/nrp/postgres-cluster.yaml`
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,6 +13,11 @@ metadata:
   namespace: knightlab-ml
 spec:
   replicas: 1
+  revisionHistoryLimit: 0  # prevents `kubectl rollout undo` from ever reintroducing a stale
+                            # ReplicaSet -- e.g. an earlier ReplicaSet from a bad `command:`
+                            # override that bypassed docker-entrypoint.sh's privilege drop and
+                            # CrashLoopBackOff'd as root. With this at 0, no old ReplicaSets are
+                            # retained for rollback in the first place.
   strategy:
     type: Recreate  # RWO volume -- avoid two pods ever trying to mount it during a rolling update
   selector:
@@ -29,10 +28,25 @@ spec:
       labels:
         app: knightgpt-postgres
     spec:
+      terminationGracePeriodSeconds: 60  # default (30s) is too short for Postgres "smart shutdown"
+                                          # waiting on idle connections (e.g. HybridRetriever's
+                                          # asyncpg pool holds pool_min_size: 2 idle connections at
+                                          # rest per src/utils/config.py). The preStop hook below
+                                          # forces a fast shutdown well within this window so we
+                                          # don't actually need the full 60s in practice, but it's
+                                          # kept as headroom in case the preStop hook itself is slow.
       containers:
         - name: postgres
-          image: ghcr.io/l1joseph/knightgpt-postgres:latest
-          imagePullPolicy: Always
+          # Pinned to an immutable sha tag, NOT :latest. This must be bumped deliberately (never
+          # automatically / via a `latest`-tracking policy) because this is a stateful service
+          # running against a live PGDATA directory: an unplanned pgGraph version change on pod
+          # restart could corrupt or break compatibility with the existing on-disk data. Confirmed
+          # via the GHCR tag list that this sha tag is the current `latest` build (same digest,
+          # sha256:aad3dec8...096a312) as of 2026-08-05.
+          image: ghcr.io/l1joseph/knightgpt-postgres:sha-d5e0036c516074f9c9b9e863d77aa469adb783b0
+          imagePullPolicy: IfNotPresent  # safe because the tag above is immutable (sha-pinned) --
+                                          # a given tag can never point at different image content,
+                                          # so there's never a need to re-pull an already-cached tag
           # No `command:` override here (deviation from the task brief): the image's own
           # Dockerfile (docker/postgres/Dockerfile) already bakes in
           # CMD ["postgres", "-c", "shared_preload_libraries=graph"] and inherits
@@ -62,6 +76,31 @@ spec:
             limits:
               cpu: "1"
               memory: 2Gi
+          lifecycle:
+            preStop:
+              exec:
+                # Forces a fast (not smart) shutdown on pod termination. SIGTERM alone triggers
+                # Postgres's "smart shutdown", which waits indefinitely for idle client
+                # connections (e.g. HybridRetriever's pool) to disconnect on their own -- with
+                # nothing forcing that, kubelet would eventually SIGKILL at the
+                # terminationGracePeriodSeconds deadline instead of a clean shutdown.
+                command: ["/bin/sh", "-c", "pg_ctl -D \"$PGDATA\" -m fast -w stop"]
+          readinessProbe:
+            # Closes a real, measured gap: without this, the Service routes traffic to a pod
+            # that's Running but not yet accepting connections (~42s window observed after pod
+            # start) -- HybridRetriever.__init__ builds its connection pool eagerly with no
+            # retry logic, so any consumer starting during that window would hard-fail.
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "knightgpt"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "knightgpt"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data

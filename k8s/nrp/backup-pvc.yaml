@@ -1,0 +1,22 @@
+# k8s/nrp/backup-pvc.yaml
+#
+# WARNING: deleting this resource (or this file, via `kubectl delete -f`) is
+# IRREVERSIBLE and destroys all stored backups. The `rook-ceph-block` storage
+# class has reclaimPolicy: Delete, so removing this PVC deletes the
+# underlying volume too -- there is no recycle bin. This is intentionally
+# kept in its own file, separate from k8s/nrp/backup-cronjob.yaml (the
+# CronJob), specifically so that a routine
+# `kubectl delete -f k8s/nrp/backup-cronjob.yaml` cleanup of the CronJob
+# can never take the backup destination volume down with it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: knightgpt-backup-dest
+  namespace: knightlab-ml
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      storage: 20Gi

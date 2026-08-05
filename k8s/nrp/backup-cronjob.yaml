@@ -9,6 +9,12 @@
 # against the Postgres Deployment and copies the DuckDB file, writing both to a
 # separate in-cluster PVC rather than assuming NRP pods can reach Cosmos scratch
 # (unconfirmed cross-cluster reachability -- see design spec).
+#
+# The destination PersistentVolumeClaim (knightgpt-backup-dest) lives in its own file,
+# k8s/nrp/backup-pvc.yaml, so a routine `kubectl delete -f k8s/nrp/backup-cronjob.yaml`
+# cleanup of the CronJob can never take the backup volume down with it (its storage
+# class has reclaimPolicy: Delete). Apply both together:
+# `kubectl apply -f k8s/nrp/backup-pvc.yaml -f k8s/nrp/backup-cronjob.yaml`
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -16,9 +22,15 @@ metadata:
   namespace: knightlab-ml
 spec:
   schedule: "0 8 * * 0"  # weekly, Sunday 08:00 UTC
+  concurrencyPolicy: Forbid  # the destination PVC is RWO; an overlapping run (a hung previous
+                              # run plus the next scheduled trigger) would otherwise be unable to
+                              # even mount the volume, silently blocking backups rather than
+                              # failing loudly
   jobTemplate:
     spec:
       backoffLimit: 2
+      activeDeadlineSeconds: 3600  # bounds a hung pg_dump (e.g. from lock contention) so it can't
+                                    # occupy the backoffLimit retry budget indefinitely
       template:
         spec:
           restartPolicy: Never
@@ -30,6 +42,10 @@ spec:
                 - -c
                 - |
                   set -euo pipefail
+                  # Retention: prune backups older than 28 days before writing new ones, so the
+                  # fixed 20Gi destination PVC doesn't silently fill up as the corpus grows
+                  # (previously unbounded weekly accumulation).
+                  find /backup -name 'knightgpt-*' -mtime +28 -delete
                   DATE=$(date +%Y%m%d)
                   pg_dump -h knightgpt-postgres -U postgres -d knightgpt \
                     -f /backup/knightgpt-postgres-${DATE}.sql
@@ -54,9 +70,16 @@ spec:
                           # (container-must-have-limits-and-requests) -- not present in the
                           # task brief's manifest, added per task-5-brief.md's flagged
                           # context before `kubectl apply` was attempted.
+                          # requests/limits sized to stay under this namespace's Gatekeeper
+                          # container-must-meet-memory-and-cpu-ratio policy (max ~1.2x), which
+                          # the original 100m/500m (5x cpu) and 256Mi/1Gi (4x memory) ratios
+                          # violated and triggered a recurring admission warning for. Note:
+                          # 850Mi/1Gi (ratio 1024/850 = 1.205) was tried first and still
+                          # triggered the warning (Gatekeeper's threshold is strict, not
+                          # inclusive of ~1.2) -- 880Mi (ratio 1.164) is comfortably under it.
                 requests:
-                  cpu: 100m
-                  memory: 256Mi
+                  cpu: 420m
+                  memory: 880Mi
                 limits:
                   cpu: 500m
                   memory: 1Gi
@@ -73,17 +96,3 @@ spec:
             - name: backup-dest
               persistentVolumeClaim:
                 claimName: knightgpt-backup-dest
----
-# append to k8s/nrp/backup-cronjob.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: knightgpt-backup-dest
-  namespace: knightlab-ml
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: rook-ceph-block
-  resources:
-    requests:
-      storage: 20Gi
