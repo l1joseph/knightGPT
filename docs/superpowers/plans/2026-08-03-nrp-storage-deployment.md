@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Provision a persistent, durable Postgres+pgGraph (via the Zalando postgres-operator) and DuckDB (via a standalone PVC) storage deployment on NRP's Kubernetes cluster, ready for a future ingestion Job and MCP server to use.
+**Goal:** Provision a persistent, durable Postgres+pgGraph (self-managed Kubernetes Deployment, no operator) and DuckDB (via a standalone PVC) storage deployment on NRP's Kubernetes cluster, ready for a future ingestion Job and MCP server to use.
 
-**Architecture:** GitHub Actions builds the existing `docker/postgres/Dockerfile` image and pushes it to GHCR (no local Docker/Podman needed). A Zalando `postgresql` custom resource in the `knightlab-ml` namespace runs that image via `spec.dockerImage`. The `graph` extension is created via a direct `psql` statement during Task 2's verification and again (idempotently) by `scripts/apply_schema.py` in Task 4 — Zalando's CRD has no bootstrap-SQL hook, unlike CloudNativePG which was the original (RBAC-blocked, see Task 2's amendment note) choice. A separate `rook-cephfs` PVC holds the DuckDB file, mountable by different pods at different times per DuckDB's single-writer constraint.
+**Architecture:** GitHub Actions builds the existing `docker/postgres/Dockerfile` image and pushes it to GHCR (no local Docker/Podman needed). A plain Kubernetes `Deployment` (1 replica) in the `knightlab-ml` namespace runs that image directly against its own PVC, fronted by a `Service`. The `graph` extension is created via a direct `psql` statement during Task 2's verification and again (idempotently) by `scripts/apply_schema.py` in Task 4. Two Postgres operators (CloudNativePG, then Zalando) were tried and abandoned during live implementation — see Task 2's amendment note and the design spec for full reasoning; neither's core value (managed multi-replica failover) applies at a single instance. A separate `rook-cephfs` PVC holds the DuckDB file, mountable by different pods at different times per DuckDB's single-writer constraint.
 
-**Tech Stack:** GitHub Actions, GHCR, Kubernetes (NRP "nautilus" cluster), Zalando postgres-operator (CRD group `acid.zalan.do/v1`, confirmed RBAC-accessible in this namespace — CloudNativePG was originally planned but this namespace has no RBAC grant for its CRD group, `postgresql.cnpg.io`), Rook-Ceph (`rook-cephfs` storage class) and Linstor (`linstor-igrok` storage class, both confirmed available in the `knightlab-ml` namespace).
+**Tech Stack:** GitHub Actions, GHCR, Kubernetes (NRP "nautilus" cluster) — plain `Deployment`/`PersistentVolumeClaim`/`Service`, no Postgres operator (CloudNativePG has no RBAC grant in this namespace; Zalando's operator requires a Spilo-based image incompatible with our vanilla-postgres-based one) — Rook-Ceph (`rook-cephfs` storage class) and Linstor (`linstor-igrok` storage class, both confirmed available in the `knightlab-ml` namespace).
 
 ## Global Constraints
 
@@ -17,9 +17,9 @@
 - Postgres storage size: `20Gi` (current data ~516MB at 117 papers, ~4GB projected at ~900 papers — 5x headroom).
 - DuckDB PVC size: `20Gi` (current embeddings ~89MB at 117 papers, ~680MB projected at ~900 papers — ~29x headroom).
 - No external network exposure for either resource in this plan — in-cluster (ClusterIP) only.
-- Postgres operator: **Zalando** (`acid.zalan.do/v1`), not CloudNativePG — this namespace has no RBAC access to `postgresql.cnpg.io` (confirmed via `kubectl auth can-i`), only to Zalando's CRD group. See Task 2's amendment note for the discovery and the design spec for full reasoning.
+- Postgres deployment: **self-managed `Deployment`, no operator.** CloudNativePG has no RBAC access in this namespace (confirmed via `kubectl auth can-i`); Zalando requires a Spilo-based image (ours is vanilla `postgres:17-bookworm`, incompatible). See Task 2's amendment note and the design spec for full reasoning.
 - Never push directly to a shared branch (`vllm`, `main`) to work around an obstacle — this happened once already in this plan's execution and had to be reverted. If a documented step doesn't work, find another way within this task's own branch/scope, or stop and report BLOCKED.
-- The Postgres service name and the credentials-secret name are **not hardcoded** anywhere in this plan after Task 2 — Zalando's naming convention needs live confirmation (see Task 2 Step 4). Every later task that needs to reach Postgres must use the actual name recorded in Task 2's report, not guess or assume a CNPG-style name.
+- The Postgres service is `knightgpt-postgres.knightlab-ml.svc.cluster.local`, credentials in Secret `knightgpt-postgres-credentials` (key `POSTGRES_PASSWORD`), user `postgres`, database `knightgpt` — fixed names, not requiring live discovery (unlike the abandoned operator attempts). Every later task uses these exact names.
 
 ---
 
@@ -129,107 +129,146 @@ Re-run the check above to confirm it now reports `public`.
 
 ---
 
-### Task 2: Zalando `postgresql` manifest for Postgres+pgGraph
+### Task 2: Self-managed Postgres Deployment for Postgres+pgGraph
 
-> **Amendment:** this task originally targeted the CloudNativePG (CNPG) operator. Live implementation found the `knightlab-ml` namespace has no RBAC access to `clusters.postgresql.cnpg.io` (`kubectl auth can-i` denied for create/get/list/watch/delete), but does have full access to Zalando's `postgresqls.acid.zalan.do` CRD (all `kubectl auth can-i` checks returned `yes`). Switched operators rather than wait on an access request of unknown duration — see the design spec's amended Decisions section. Zalando's CRD confirmed (via `kubectl explain postgresql.spec --api-version=acid.zalan.do/v1` and Zalando's own upstream example manifest at `github.com/zalando/postgres-operator/blob/master/manifests/minimal-postgres-manifest.yaml`) to support custom images via `spec.dockerImage`, satisfying the same core requirement.
+> **Amendment (second):** this task tried CloudNativePG first (no RBAC access to its CRD in this namespace, confirmed via `kubectl auth can-i`), then Zalando (RBAC confirmed working, but its operator requires images built on a "Spilo" base bundling Patroni — our image is `FROM postgres:17-bookworm`, the vanilla upstream image, which CrashLoopBackOff'd under Zalando's management). Both attempts are abandoned. This version uses a plain Kubernetes `Deployment` + `PersistentVolumeClaim` + `Service` — no operator. Neither operator's core value (managed multi-replica failover) applies at `replicas: 1` anyway; see the design spec's twice-amended Decisions section for full reasoning. This is simpler than either operator attempt: the vanilla `postgres` image's own `POSTGRES_DB`/`POSTGRES_USER`/`POSTGRES_PASSWORD` env-var bootstrap mechanism applies directly, no operator-specific CRD schema or bootstrap hook to satisfy.
 
 **Files:**
-- Create: `k8s/nrp/postgres-cluster.yaml`
+- Create: `k8s/nrp/postgres-cluster.yaml` (Deployment, PVC, Service)
 
 **Interfaces:**
 - Consumes: the GHCR image from Task 1 (`ghcr.io/l1joseph/knightgpt-postgres:latest`).
-- Produces: a reachable Postgres service in the `knightlab-ml` namespace, database `knightgpt`, with the `graph` extension available for Task 4 to create — consumed by Task 4 (schema application) and, in a future plan, the ingestion Job and MCP server. Zalando's exact primary-service DNS name must be discovered live in Step 4 below (its naming convention differs from CNPG's `-rw` suffix and isn't being guessed here) — record it in the task report for later tasks/plans to reference.
+- Produces: a reachable Postgres service at `knightgpt-postgres.knightlab-ml.svc.cluster.local:5432`, database `knightgpt`, user `postgres` — consumed by Task 4 (schema application) and, in a future plan, the ingestion Job and MCP server. The credentials Secret is created imperatively (Step 1, not committed to git) — its name (`knightgpt-postgres-credentials`) is fixed and used consistently by every later task, unlike the operator attempts where names needed live discovery.
 
-- [ ] **Step 1: Create the manifest**
+- [ ] **Step 1: Generate and create the credentials Secret (not committed to git — plaintext passwords don't belong in version control)**
+
+```bash
+POSTGRES_PASSWORD=$(openssl rand -base64 24)
+kubectl create secret generic knightgpt-postgres-credentials \
+  -n knightlab-ml \
+  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD"
+echo "Password generated and stored in the knightgpt-postgres-credentials Secret (not printed here to avoid leaking it into shell history/logs — retrieve it from the Secret when needed: kubectl get secret knightgpt-postgres-credentials -n knightlab-ml -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)"
+```
+
+- [ ] **Step 2: Create the Deployment, PVC, and Service manifest**
 
 ```yaml
 # k8s/nrp/postgres-cluster.yaml
-apiVersion: "acid.zalan.do/v1"
-kind: postgresql
+apiVersion: v1
+kind: PersistentVolumeClaim
 metadata:
-  name: knightlab-knightgpt-postgres
+  name: knightgpt-postgres-data
   namespace: knightlab-ml
 spec:
-  teamId: "knightlab"
-  dockerImage: ghcr.io/l1joseph/knightgpt-postgres:latest
-  numberOfInstances: 1
-
-  users:
-    knightgpt:
-      - superuser
-      - createdb
-
-  databases:
-    knightgpt: knightgpt
-
-  postgresql:
-    version: "17"
-    parameters:
-      shared_preload_libraries: "graph"
-
-  volume:
-    size: 20Gi
-    storageClass: linstor-igrok
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: linstor-igrok
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knightgpt-postgres
+  namespace: knightlab-ml
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # RWO volume -- avoid two pods ever trying to mount it during a rolling update
+  selector:
+    matchLabels:
+      app: knightgpt-postgres
+  template:
+    metadata:
+      labels:
+        app: knightgpt-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: ghcr.io/l1joseph/knightgpt-postgres:latest
+          imagePullPolicy: Always
+          command: ["postgres", "-c", "shared_preload_libraries=graph"]
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: knightgpt
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knightgpt-postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata  # subdirectory, not the mount root -- the vanilla postgres image's initdb refuses a non-empty mount root (e.g. a lost+found dir some storage backends create), this is the documented workaround
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: knightgpt-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: knightgpt-postgres
+  namespace: knightlab-ml
+spec:
+  selector:
+    app: knightgpt-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
 ```
 
-Note on `metadata.name` starting with `knightlab-` (the `teamId`) — Zalando's operator, depending on its `OperatorConfiguration` (not readable from this namespace — `kubectl get operatorconfiguration` returns Forbidden), may enforce a `<teamId>-` name prefix. This manifest follows that convention defensively; if `kubectl apply` still rejects the name for a different reason, adjust based on the actual error message rather than guessing further blind.
+Note on `imagePullPolicy: Always` and the mutable `latest` tag — same reasoning as both prior operator attempts: acceptable for now, a future follow-up could pin to an immutable SHA tag once this deployment is stable.
 
-Note on `dockerImage` using the mutable `latest` tag — same reasoning as the original CNPG plan: acceptable for now, a future follow-up could pin to an immutable SHA tag once this deployment is stable.
-
-- [ ] **Step 2: Apply the manifest**
+- [ ] **Step 3: Apply the manifest**
 
 ```bash
 kubectl apply -f k8s/nrp/postgres-cluster.yaml
 ```
 
-If this fails with a validation error (e.g. about `metadata.name`, required fields, or enum values), read the actual error message and adjust the manifest accordingly — don't force a workaround outside this task's scope (no pushing to shared branches, no modifying cluster-scoped resources, no requesting elevated permissions). If you can't resolve it from the error message alone, stop and report BLOCKED with the exact error.
+If this fails with a validation error, read the actual error message and adjust the manifest accordingly — don't force a workaround outside this task's scope (no pushing to shared branches, no modifying cluster-scoped resources, no requesting elevated permissions). If you can't resolve it from the error message alone, stop and report BLOCKED with the exact error.
 
-- [ ] **Step 3: Wait for the cluster to become healthy**
+- [ ] **Step 4: Wait for the pod to become ready**
 
 ```bash
-kubectl get postgresql knightlab-knightgpt-postgres -n knightlab-ml -w
+kubectl get pods -n knightlab-ml -l app=knightgpt-postgres -w
 ```
 
-Expected: the resource's pods reach `Running` (may take a few minutes for image pull + initdb). Press Ctrl-C once they do. If it doesn't stabilize within ~10 minutes, check:
+Expected: reaches `1/1 Running` (may take a minute or two for image pull + initdb — much faster than either operator attempt since there's no operator reconciliation loop involved, just a direct Deployment). Press Ctrl-C once it does. If it doesn't stabilize within ~5 minutes, check:
 
 ```bash
-kubectl describe postgresql knightlab-knightgpt-postgres -n knightlab-ml
-kubectl get pods -n knightlab-ml -l cluster-name=knightlab-knightgpt-postgres
-kubectl logs -n knightlab-ml -l cluster-name=knightlab-knightgpt-postgres --tail=100
+kubectl describe pod -n knightlab-ml -l app=knightgpt-postgres
+kubectl logs -n knightlab-ml -l app=knightgpt-postgres --tail=100
 ```
 
-(The label selector `cluster-name=<resource-name>` is Zalando's convention for pods it manages — if this returns no pods, list all pods in the namespace and look for ones referencing this cluster name to find the correct label, and note the actual label in your report since later tasks/plans will need it.)
-
-- [ ] **Step 4: Discover the primary service name and verify the `graph` extension loads**
+- [ ] **Step 5: Verify the `graph` extension loads, via port-forward**
 
 ```bash
-kubectl get svc -n knightlab-ml | grep knightlab-knightgpt-postgres
-```
-
-Zalando typically creates a service matching the cluster's `metadata.name` directly (unlike CNPG's `-rw` suffix convention) — confirm the actual service name from this output rather than assuming, then port-forward to it:
-
-```bash
-kubectl port-forward -n knightlab-ml svc/<actual-service-name-from-above> 5433:5432 &
+kubectl port-forward -n knightlab-ml svc/knightgpt-postgres 5433:5432 &
 PF_PID=$!
 sleep 3
-PGPASSWORD=$(kubectl get secret -n knightlab-ml knightgpt.knightlab-knightgpt-postgres.credentials.postgresql.acid.zalan.do -o jsonpath='{.data.password}' | base64 -d) \
-  psql -h localhost -p 5433 -U knightgpt -d knightgpt -c 'CREATE EXTENSION IF NOT EXISTS graph;'
-PGPASSWORD=$(kubectl get secret -n knightlab-ml knightgpt.knightlab-knightgpt-postgres.credentials.postgresql.acid.zalan.do -o jsonpath='{.data.password}' | base64 -d) \
-  psql -h localhost -p 5433 -U knightgpt -d knightgpt -c '\dx'
+PGPASSWORD=$(kubectl get secret knightgpt-postgres-credentials -n knightlab-ml -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d) \
+  psql -h localhost -p 5433 -U postgres -d knightgpt -c 'CREATE EXTENSION IF NOT EXISTS graph;'
+PGPASSWORD=$(kubectl get secret knightgpt-postgres-credentials -n knightlab-ml -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d) \
+  psql -h localhost -p 5433 -U postgres -d knightgpt -c '\dx'
 kill $PF_PID
 ```
 
-Note: unlike the original CNPG plan (which used a bootstrap-time `postInitApplicationSQL` hook), Zalando's CRD has no equivalent bootstrap-SQL field, so the `CREATE EXTENSION IF NOT EXISTS graph;` statement is run directly here via psql — this is a one-time manual step for this task's verification; Task 4's `apply_schema.py` will also run this same idempotent statement as part of `sql/schema.sql`, so it's safe to run twice.
+Note: like the vanilla-image approach this always was, there's no operator bootstrap-SQL hook — `CREATE EXTENSION IF NOT EXISTS graph;` is run directly here via psql as a one-time verification step. Task 4's `apply_schema.py` runs this same idempotent statement again as part of `sql/schema.sql`, so running it twice is safe.
 
-The secret name convention (`<username>.<cluster-name>.credentials.postgresql.acid.zalan.do`) is Zalando's standard pattern — if `kubectl get secret` reports not found, list secrets in the namespace (`kubectl get secrets -n knightlab-ml | grep knightgpt`) to find the actual name and note it in your report, since later tasks/plans will need it.
+Expected: the `\dx` output lists `graph` (and `plpgsql`, which ships by default). If `graph` is missing, `shared_preload_libraries=graph` may not have taken effect — check `kubectl logs` for the pod's startup output for any error mentioning the `graph` library.
 
-Expected: the `\dx` output lists `graph` (and `plpgsql`, which ships by default).
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add k8s/nrp/postgres-cluster.yaml
-git commit -m "feat(nrp): Zalando postgresql manifest for Postgres+pgGraph"
+git commit -m "feat(nrp): self-managed Postgres Deployment+PVC+Service for Postgres+pgGraph"
 ```
 
 ---
@@ -371,13 +410,13 @@ git commit -m "feat(nrp): DuckDB RWX PVC and verification pod"
 - Modify: none (reuses existing `scripts/apply_schema.py` and `sql/schema.sql` as-is)
 
 **Interfaces:**
-- Consumes: the Task 2 Postgres service, reached via port-forward for this one-time application. Use the actual service and secret names recorded in Task 2's report (`/cosmos/nfs/home/l1joseph/knightGPT/.superpowers/sdd/2026-08-03-nrp-storage-deployment/task-2-report.md`) — Zalando's naming convention wasn't hardcoded in this plan since it needed live confirmation. Read that report before starting this task.
+- Consumes: the Task 2 Postgres service (`knightgpt-postgres.knightlab-ml.svc.cluster.local`, credentials in the `knightgpt-postgres-credentials` Secret, user `postgres`), reached via port-forward for this one-time application.
 - Produces: `papers`, `chunks`, `chunk_edges` tables and pgGraph registration in the `knightgpt` database on NRP — the actual schema state a future ingestion Job and MCP server will read/write.
 
 - [ ] **Step 1: Port-forward to the new Postgres instance**
 
 ```bash
-kubectl port-forward -n knightlab-ml svc/<service-name-from-task-2-report> 5433:5432 &
+kubectl port-forward -n knightlab-ml svc/knightgpt-postgres 5433:5432 &
 PF_PID=$!
 sleep 3
 ```
@@ -385,8 +424,8 @@ sleep 3
 - [ ] **Step 2: Get the connection password and build a DSN**
 
 ```bash
-PGPASSWORD=$(kubectl get secret -n knightlab-ml <secret-name-from-task-2-report> -o jsonpath='{.data.password}' | base64 -d)
-DSN="postgresql://knightgpt:${PGPASSWORD}@localhost:5433/knightgpt"
+PGPASSWORD=$(kubectl get secret knightgpt-postgres-credentials -n knightlab-ml -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+DSN="postgresql://postgres:${PGPASSWORD}@localhost:5433/knightgpt"
 ```
 
 - [ ] **Step 3: Run apply_schema.py against it**
@@ -402,7 +441,7 @@ Expected output ends with: `pgGraph registration verified: chunks table and simi
 - [ ] **Step 4: Verify the tables exist independently, via psql**
 
 ```bash
-PGPASSWORD="$PGPASSWORD" psql -h localhost -p 5433 -U knightgpt -d knightgpt -c '\dt'
+PGPASSWORD="$PGPASSWORD" psql -h localhost -p 5433 -U postgres -d knightgpt -c '\dt'
 ```
 
 Expected: lists `papers`, `chunks`, `chunk_edges`.
@@ -458,8 +497,6 @@ Expected: `READYTOUSE` becomes `true` within a few minutes. If it does, document
 
 - [ ] **Step 3: If snapshots are NOT available, create the fallback CronJob manifest**
 
-Before writing the manifest, read Task 2's report (`/cosmos/nfs/home/l1joseph/knightGPT/.superpowers/sdd/2026-08-03-nrp-storage-deployment/task-2-report.md`) for the actual Zalando service and credentials-secret names — replace the `<service-name-from-task-2-report>` and `<secret-name-from-task-2-report>` placeholders below with those real values before applying.
-
 ```yaml
 # k8s/nrp/backup-cronjob.yaml
 apiVersion: batch/v1
@@ -484,15 +521,15 @@ spec:
                 - |
                   set -euo pipefail
                   DATE=$(date +%Y%m%d)
-                  pg_dump -h <service-name-from-task-2-report> -U knightgpt -d knightgpt \
+                  pg_dump -h knightgpt-postgres -U postgres -d knightgpt \
                     -f /backup/knightgpt-postgres-${DATE}.sql
                   cp /duckdb-data/embeddings.duckdb /backup/knightgpt-embeddings-${DATE}.duckdb
               env:
                 - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef:
-                      name: <secret-name-from-task-2-report>
-                      key: password
+                      name: knightgpt-postgres-credentials
+                      key: POSTGRES_PASSWORD
               volumeMounts:
                 - name: duckdb-data
                   mountPath: /duckdb-data
@@ -569,8 +606,8 @@ git commit -m "docs(nrp): resolve backup strategy decision, implement fallback i
 After all 5 tasks, confirm the full storage tier is ready for the next plan (ingestion Job) to build on:
 
 ```bash
-kubectl get cluster knightgpt-postgres -n knightlab-ml
-kubectl get pvc knightgpt-duckdb -n knightlab-ml
+kubectl get pods -n knightlab-ml -l app=knightgpt-postgres
+kubectl get pvc knightgpt-postgres-data knightgpt-duckdb -n knightlab-ml
 ```
 
 Expected: Postgres cluster healthy, DuckDB PVC bound, schema applied (from Task 4), backup strategy resolved one way or the other (from Task 5). No pods left over from verification steps (Task 3's `duckdb-verify` pod deleted, Task 5's test snapshot/job deleted).
