@@ -75,6 +75,16 @@ def build_papers_dict(chunks: list[Chunk], doi_lookup: dict[str, str]) -> dict:
     return papers
 
 
+def all_embeddings_missing(chunks: list[Chunk]) -> bool:
+    """True if every chunk lacks an embedding (a full embedding-server
+    outage), not just some. VLLMEmbedder.embed_chunks() catches exceptions
+    internally rather than raising, so a total vLLM outage returns every
+    chunk with .embedding = None instead of failing loudly -- this lets
+    run_batch_ingestion() detect that case and treat it as the batch-level
+    infrastructure failure it actually is."""
+    return bool(chunks) and all(c.embedding is None for c in chunks)
+
+
 def ensure_longread_dois_derived() -> Path:
     """Phase 0: derive data/paper_lists/longread_papers.txt from the
     checked-in TSV, unless already present from a prior run."""
@@ -176,6 +186,11 @@ def run_batch_ingestion(
                 continue
 
             batch_chunks = embedder.embed_chunks(batch_chunks)
+            if all_embeddings_missing(batch_chunks):
+                raise RuntimeError(
+                    f"Batch {i}: embedding produced no results for any of {len(batch_chunks)} chunks "
+                    f"-- likely a vLLM embedding server outage, treating as a batch-level failure"
+                )
             papers = build_papers_dict(batch_chunks, doi_lookup)
             insert_stats = asyncio.run(_insert_batch(batch_chunks, papers, store))
 

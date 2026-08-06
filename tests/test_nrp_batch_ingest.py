@@ -76,3 +76,49 @@ def test_build_papers_dict_handles_missing_source_file():
     papers = build_papers_dict(chunks, doi_lookup={})
 
     assert papers == {}
+
+
+@pytest.mark.unit
+def test_all_embeddings_missing_true_when_every_chunk_lacks_embedding():
+    from scripts.nrp_batch_ingest import all_embeddings_missing
+    from src.chunking import Chunk
+
+    chunks = [
+        Chunk(id="c1", text="a", source_file="f.md", embedding=None),
+        Chunk(id="c2", text="b", source_file="f.md", embedding=None),
+    ]
+
+    assert all_embeddings_missing(chunks) is True
+
+
+@pytest.mark.unit
+def test_all_embeddings_missing_false_when_some_chunks_embedded():
+    from scripts.nrp_batch_ingest import all_embeddings_missing
+    from src.chunking import Chunk
+
+    chunks = [
+        Chunk(id="c1", text="a", source_file="f.md", embedding=[0.1, 0.2]),
+        Chunk(id="c2", text="b", source_file="f.md", embedding=None),
+    ]
+
+    assert all_embeddings_missing(chunks) is False
+
+
+@pytest.mark.unit
+def test_all_embeddings_missing_false_when_all_chunks_embedded():
+    from scripts.nrp_batch_ingest import all_embeddings_missing
+    from src.chunking import Chunk
+
+    chunks = [
+        Chunk(id="c1", text="a", source_file="f.md", embedding=[0.1, 0.2]),
+        Chunk(id="c2", text="b", source_file="f.md", embedding=[0.3, 0.4]),
+    ]
+
+    assert all_embeddings_missing(chunks) is False
+
+
+@pytest.mark.unit
+def test_all_embeddings_missing_false_for_empty_list():
+    from scripts.nrp_batch_ingest import all_embeddings_missing
+
+    assert all_embeddings_missing([]) is False
