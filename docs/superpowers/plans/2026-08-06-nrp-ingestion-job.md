@@ -601,7 +601,44 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      securityContext:  # fsGroup 1000 matches appuser's UID/GID in docker/Dockerfile.ingestion
+                         # (confirmed via `id` in a debug pod: uid=1000(appuser) gid=1000(appuser)).
+                         # Without this, freshly-provisioned PVCs (ingestion-data, and duckdb-data
+                         # on its first write) mount root-owned at 0755, and the non-root
+                         # container hits `PermissionError: [Errno 13] Permission denied` trying
+                         # to mkdir under /data -- observed on a real validation run before this
+                         # was added. fsGroup makes the CSI driver chown the volume roots to gid
+                         # 1000 on mount, which appuser's group membership satisfies.
+        fsGroup: 1000
       initContainers:
+        - name: fix-duckdb-permissions
+          # Discovered on a real validation run: fsGroup (above) correctly chowns
+          # ingestion-data (rook-ceph-block) on mount, but has no effect on duckdb-data
+          # (rook-cephfs) -- confirmed by exec'ing into a throwaway root debug pod mounting
+          # just that PVC: root:root, drwxr-xr-x (0755). This cluster's CephFS CSI driver
+          # does not appear to honor fsGroup for that storage class. Without this, the
+          # ingestion container (running as non-root appuser, uid 1000) fails with
+          # `_duckdb.IOException: IO Error: ... Permission denied` trying to create
+          # embeddings.duckdb (surfaced by src/graph/duckdb_store.py as a slightly
+          # misleading "locked by another process" RuntimeError, since that code assumes
+          # any DuckDB open failure means a lock conflict -- the real cause here is a plain
+          # filesystem permission error). This one-shot root init container chown's the
+          # mount before the main container starts; safe to rerun (chown, not destructive)
+          # and safe even once the store has real data in it.
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1000:1000 /duckdb-data"]
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: duckdb-data
+              mountPath: /duckdb-data
         - name: vllm-embedding
           restartPolicy: Always  # native sidecar (K8s 1.29+): starts before the main
                                   # container, torn down automatically when the main
@@ -638,12 +675,13 @@ spec:
           imagePullPolicy: Always
           command: ["python", "scripts/nrp_batch_ingest.py", "--max-papers", "20", "--log-level", "INFO"]
           env:
-            # POSTGRES_PASSWORD must come BEFORE POSTGRES_DSN in this list -- Kubernetes only
-            # expands $(VAR) references to env vars defined earlier in the same container's
-            # env list (see k8s/nrp/README.md's own documented example, which has this
-            # right). Getting the order backwards means $(POSTGRES_PASSWORD) is never
-            # substituted -- the literal string is sent as the password, producing a real
-            # InvalidPasswordError from Postgres, not a client-side/DSN-parsing error.
+            # POSTGRES_PASSWORD must come BEFORE POSTGRES_DSN -- Kubernetes only expands
+            # $(VAR) references to env vars defined earlier in the same container's env
+            # list (see k8s/nrp/README.md's own documented example). The original order
+            # here had this backwards: $(POSTGRES_PASSWORD) was never substituted, so the
+            # literal string was sent as the password, producing a real, reproducible
+            # InvalidPasswordError from Postgres on a live validation run -- not a
+            # DSN-parsing or client-side issue.
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -663,10 +701,16 @@ spec:
               value: http://localhost:8001/v1
             - name: VLLM_EMBEDDING_MODEL
               value: Alibaba-NLP/gte-Qwen2-7B-instruct
-          resources:
+          resources:  # requests == limits (ratio 1.0) to satisfy this namespace's Gatekeeper
+                      # container-must-meet-memory-and-cpu-ratio policy (max ~1.2x). The
+                      # brief's original values (2/4 cpu, 4Gi/8Gi memory -- ratio 2x on both)
+                      # triggered admission warnings identical in kind to the ones hit and
+                      # fixed in the storage sub-project's backup CronJob (k8s/nrp/
+                      # backup-cronjob.yaml); this is a short validation-scale run with no
+                      # need for burst headroom, so pinning request=limit is simplest.
             requests:
-              cpu: "2"
-              memory: 4Gi
+              cpu: "4"
+              memory: 8Gi
             limits:
               cpu: "4"
               memory: 8Gi
