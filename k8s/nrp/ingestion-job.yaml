@@ -1,0 +1,95 @@
+# k8s/nrp/ingestion-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: knightgpt-ingestion
+  namespace: knightlab-ml
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 21600  # 6 hours -- generous ceiling for a run of this size; NRP
+                                  # policy requires Jobs to run a command that terminates on
+                                  # its own, this is the hard backstop if something hangs
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: vllm-embedding
+          restartPolicy: Always  # native sidecar (K8s 1.29+): starts before the main
+                                  # container, torn down automatically when the main
+                                  # container exits, regardless of exit status
+          image: vllm/vllm-openai:v0.26.0
+          args:
+            - "--model"
+            - "Alibaba-NLP/gte-Qwen2-7B-instruct"
+            - "--port"
+            - "8001"
+            - "--trust-remote-code"
+          ports:
+            - containerPort: 8001
+          resources:
+            requests:
+              cpu: "4"
+              memory: 32Gi
+              nvidia.com/a100: 1
+            limits:
+              cpu: "4"
+              memory: 32Gi
+              nvidia.com/a100: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30  # model load can take several minutes
+      containers:
+        - name: ingestion
+          image: ghcr.io/l1joseph/knightgpt-ingestion:latest
+          imagePullPolicy: Always
+          command: ["python", "scripts/nrp_batch_ingest.py", "--max-papers", "20", "--log-level", "INFO"]
+          env:
+            - name: POSTGRES_DSN
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knightgpt-postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: INGEST_RAW_PDF_DIR
+              value: /data/raw_pdfs
+            - name: INGEST_MARKDOWN_DIR
+              value: /data/markdown
+            - name: INGEST_PROCESSED_DIR
+              value: /data/processed
+            - name: INGEST_DUCKDB_PATH
+              value: /duckdb-data/embeddings.duckdb
+            - name: VLLM_EMBEDDING_URL
+              value: http://localhost:8001/v1
+            - name: VLLM_EMBEDDING_MODEL
+              value: Alibaba-NLP/gte-Qwen2-7B-instruct
+          resources:  # requests == limits (ratio 1.0) to satisfy this namespace's Gatekeeper
+                      # container-must-meet-memory-and-cpu-ratio policy (max ~1.2x). The
+                      # brief's original values (2/4 cpu, 4Gi/8Gi memory -- ratio 2x on both)
+                      # triggered admission warnings identical in kind to the ones hit and
+                      # fixed in the storage sub-project's backup CronJob (k8s/nrp/
+                      # backup-cronjob.yaml); this is a short validation-scale run with no
+                      # need for burst headroom, so pinning request=limit is simplest.
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: ingestion-data
+              mountPath: /data
+            - name: duckdb-data
+              mountPath: /duckdb-data
+      volumes:
+        - name: ingestion-data
+          persistentVolumeClaim:
+            claimName: knightgpt-ingestion-data
+        - name: duckdb-data
+          persistentVolumeClaim:
+            claimName: knightgpt-duckdb

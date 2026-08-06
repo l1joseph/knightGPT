@@ -1,0 +1,19 @@
+# k8s/nrp/ingestion-pvc.yaml
+#
+# WARNING: this PVC's storage class (rook-ceph-block) has reclaimPolicy:
+# Delete. Deleting this resource destroys all downloaded PDFs/markdown/
+# chunks irreversibly. Kept in its own file, separate from the Job
+# manifest, so `kubectl delete -f k8s/nrp/ingestion-job.yaml` (a natural
+# cleanup command once the Job is done) does not also delete this data.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: knightgpt-ingestion-data
+  namespace: knightlab-ml
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: rook-ceph-block
+  resources:
+    requests:
+      storage: 30Gi
