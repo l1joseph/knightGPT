@@ -12,7 +12,44 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      securityContext:  # fsGroup 1000 matches appuser's UID/GID in docker/Dockerfile.ingestion
+                         # (confirmed via `id` in a debug pod: uid=1000(appuser) gid=1000(appuser)).
+                         # Without this, freshly-provisioned PVCs (ingestion-data, and duckdb-data
+                         # on its first write) mount root-owned at 0755, and the non-root
+                         # container hits `PermissionError: [Errno 13] Permission denied` trying
+                         # to mkdir under /data -- observed on a real validation run before this
+                         # was added. fsGroup makes the CSI driver chown the volume roots to gid
+                         # 1000 on mount, which appuser's group membership satisfies.
+        fsGroup: 1000
       initContainers:
+        - name: fix-duckdb-permissions
+          # Discovered on a real validation run: fsGroup (above) correctly chowns
+          # ingestion-data (rook-ceph-block) on mount, but has no effect on duckdb-data
+          # (rook-cephfs) -- confirmed by exec'ing into a throwaway root debug pod mounting
+          # just that PVC: root:root, drwxr-xr-x (0755). This cluster's CephFS CSI driver
+          # does not appear to honor fsGroup for that storage class. Without this, the
+          # ingestion container (running as non-root appuser, uid 1000) fails with
+          # `_duckdb.IOException: IO Error: ... Permission denied` trying to create
+          # embeddings.duckdb (surfaced by src/graph/duckdb_store.py as a slightly
+          # misleading "locked by another process" RuntimeError, since that code assumes
+          # any DuckDB open failure means a lock conflict -- the real cause here is a plain
+          # filesystem permission error). This one-shot root init container chown's the
+          # mount before the main container starts; safe to rerun (chown, not destructive)
+          # and safe even once the store has real data in it.
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1000:1000 /duckdb-data"]
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: duckdb-data
+              mountPath: /duckdb-data
         - name: vllm-embedding
           restartPolicy: Always  # native sidecar (K8s 1.29+): starts before the main
                                   # container, torn down automatically when the main
