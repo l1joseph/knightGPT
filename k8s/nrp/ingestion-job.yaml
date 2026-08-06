@@ -1,4 +1,11 @@
 # k8s/nrp/ingestion-job.yaml
+#
+# Re-running: Kubernetes Jobs are immutable, so re-applying this over an
+# already-Complete Job of the same name fails. Delete first:
+#   kubectl delete job knightgpt-ingestion -n knightlab-ml && kubectl apply -f k8s/nrp/ingestion-job.yaml
+# `image:` below uses the moving `:latest` tag -- see k8s/nrp/README.md's
+# "Re-running the ingestion Job" section for the sha-<commit> pinning option
+# and the exact image digest that produced the current live data.
 apiVersion: batch/v1
 kind: Job
 metadata:
