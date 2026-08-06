@@ -36,3 +36,43 @@ def test_partition_into_batches_batch_size_larger_than_input():
 
     items = [1, 2, 3]
     assert partition_into_batches(items, batch_size=50) == [[1, 2, 3]]
+
+
+@pytest.mark.unit
+def test_build_papers_dict_resolves_doi_per_chunk():
+    from scripts.nrp_batch_ingest import build_papers_dict
+    from src.chunking import Chunk
+
+    chunks = [
+        Chunk(
+            id="c1",
+            text="a",
+            source_file="/data/markdown/10-1234_x.md",
+            metadata={"title": "Paper X"},
+        ),
+        Chunk(
+            id="c2",
+            text="b",
+            source_file="/data/markdown/10-1234_x.md",
+            metadata={"title": "Paper X"},
+        ),
+    ]
+    doi_lookup = {"10-1234_x": "10.1234/x"}
+
+    papers = build_papers_dict(chunks, doi_lookup)
+
+    assert papers["/data/markdown/10-1234_x.md"]["doi"] == "10.1234/x"
+    assert papers["/data/markdown/10-1234_x.md"]["title"] == "Paper X"
+    # Same source_file across multiple chunks must produce exactly one entry.
+    assert len(papers) == 1
+
+
+@pytest.mark.unit
+def test_build_papers_dict_handles_missing_source_file():
+    from scripts.nrp_batch_ingest import build_papers_dict
+    from src.chunking import Chunk
+
+    chunks = [Chunk(id="c1", text="a", source_file="", metadata={})]
+    papers = build_papers_dict(chunks, doi_lookup={})
+
+    assert papers == {}
