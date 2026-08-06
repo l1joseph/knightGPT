@@ -1,0 +1,54 @@
+# GPU-Backed Ingestion Job on NRP
+
+## Context
+
+The first of three NRP sub-projects (persistent Postgres+pgGraph+DuckDB storage) is complete and merged — see `docs/superpowers/specs/2026-08-03-nrp-storage-deployment-design.md` and `k8s/nrp/`. That storage is currently empty except for the applied schema: only the OLD Cosmos-based pipeline's output (117 papers, 6,179 chunks, in a file-based `chunks_with_emb.json`) exists anywhere, and none of it has been migrated into the new NRP storage.
+
+This spec covers the second sub-project: a GPU-backed Kubernetes Job on NRP that runs a **fresh, full ingestion covering everything** — all four paper source lists (`data/paper_lists/initial_papers.txt`, `zotero_papers.txt`, `mmc_papers.txt`, `sources/longread_bioprojects.tsv`; ~900 combined raw entries) processed from scratch into the NRP Postgres+DuckDB storage, not an incremental/net-new-only run. The existing 117 papers are a subset of `initial_papers.txt`/`zotero_papers.txt` already, so this run naturally re-covers them as part of the full corpus rather than requiring a separate migration step.
+
+The third sub-project (an MCP server exposing retrieval) depends on this one having populated the storage, and is out of scope here.
+
+## Decisions
+
+- **vLLM embedding server: a native Kubernetes sidecar container within the same Job, not a separate Deployment or a separate coordinated Job.** NRP policy forbids GPU access for long-running Deployments but permits it for bounded-duration Jobs (confirmed this session via NRP's own policy docs). A native sidecar (`initContainers` with `restartPolicy: Always`, stable since Kubernetes 1.29 — confirmed supported on this cluster's server version v1.33.8) starts before the main container, and Kubernetes automatically terminates it when the main container exits, regardless of exit status. This keeps the whole unit self-contained as one bounded-duration Job with no manual start/stop coordination between two separate resources.
+- **vLLM image: the official `vllm/vllm-openai` CUDA image, not the ROCm image used on Cosmos.** NRP's A100 GPUs are NVIDIA; Cosmos's MI300A APUs are AMD. These require different vLLM builds — this is an easy detail to miss since "vLLM" is the same software either way, but the container image is not interchangeable across GPU vendors.
+- **Batched orchestration, not a monolithic 900-paper run, and not new skip-logic inside the existing pipeline.** Investigated the existing pipeline's idempotency directly: `scripts/download_papers.py` already skips DOIs whose PDF is already on disk (resumable), but the convert → chunk → embed steps inside `scripts/ingest_pipeline.py::run_pipeline()` have no equivalent check — every re-run reprocesses its full input from scratch. Rather than modifying that shared, existing pipeline code (invasive, affects call sites beyond this Job), a new orchestration script processes papers in fixed-size batches (default 50) through the full pipeline per batch, bounding the cost of any single failure to one batch's re-work rather than the whole corpus — and since downloading (the one already-resumable step) happens once upfront for the full DOI list, even a full Job restart doesn't re-fetch anything already on disk.
+- **Intermediates (raw PDFs, markdown, chunks) persist to a PVC, not `emptyDir`.** This is what makes the download step's existing resumability actually pay off across a Job restart — `emptyDir` is deleted with the pod, defeating that. Sizing: ~900 papers at a typical 1-5MB PDF size projects to roughly 1-4.5GB of raw PDFs alone, with markdown/chunk JSON adding modestly on top — a 30Gi PVC leaves comfortable headroom (consistent with the storage deployment's sizing approach of picking a concrete number with several-times headroom rather than an exact fit).
+- **Per-paper failures are non-fatal; only whole-batch infrastructure failures fail the Job.** Matches `download_papers.py`'s existing per-DOI error-handling pattern and the already-set expectation that PDF fetch success won't be 100% (paywalls, dead links). A batch's individual paper failures are logged and counted, not retried automatically within the same run.
+- **A new Dockerfile and GitHub Actions workflow for the ingestion image, mirroring the storage deployment's already-proven pattern.** `docker/Dockerfile.api` excludes `scripts/` (API-server-only) and has no ingestion dependencies wired up for a standalone image; `docker/postgres/Dockerfile` + `.github/workflows/build-postgres-image.yml` already established the GHCR build/push pattern this session — reuse it rather than inventing a new one.
+
+## Architecture
+
+A single Kubernetes `Job` in `knightlab-ml`, two containers: a native sidecar running `vllm/vllm-openai` serving `gte-Qwen2-7B-instruct` (3584-dim, unchanged from production — no dimension switch, per this session's earlier DuckDB validation work) on 1 A100 GPU, and a main container running a new batch-orchestration script against the already-deployed Postgres+DuckDB storage. Intermediates live on a dedicated PVC. When the main container exits (success or failure), Kubernetes tears down the sidecar and the Job completes.
+
+## Components
+
+- **`k8s/nrp/ingestion-job.yaml`** (new): the Job manifest.
+  - vLLM sidecar: `image: vllm/vllm-openai:latest` (or a pinned version — resolved during implementation), `nvidia.com/a100: 1` request/limit, `--model Alibaba-NLP/gte-Qwen2-7B-instruct` command args, exposes port 8001 on `localhost` within the pod (shared network namespace with the main container — no separate Service needed since nothing outside this pod talks to it).
+  - Main container: the new ingestion image, env vars matching `k8s/nrp/README.md`'s documented contract (`POSTGRES_DSN`, `INGEST_DUCKDB_PATH`) plus `VLLM_EMBEDDING_URL=http://localhost:8001/v1`, `resources.requests`/`limits` sized for CPU-only PDF conversion work (no GPU needed in this container — embedding is HTTP to the sidecar), mounts the new intermediates PVC and (implicitly, via `POSTGRES_DSN`/`INGEST_DUCKDB_PATH`) reaches the existing storage.
+  - New PVC for intermediates: `rook-ceph-block` (RWO is fine — single Job, single writer), `30Gi` (see Decisions for the sizing rationale).
+  - `backoffLimit` and `activeDeadlineSeconds` set per NRP's requirement that Jobs run a command that terminates on its own (no `sleep infinity`/manual-start patterns, which are policy-prohibited and can result in a ban) — the orchestration script must run to completion or a clear failure, never hang waiting for external input.
+- **`docker/Dockerfile.ingestion`** (new): lightweight Python image (no CUDA/GPU libraries — embedding is remote HTTP), copies `src/`, `scripts/`, `requirements.txt`, `configs/`.
+- **`.github/workflows/build-ingestion-image.yml`** (new): mirrors `build-postgres-image.yml` — builds `docker/Dockerfile.ingestion` on push to `vllm` (path-filtered) and manual dispatch, pushes to `ghcr.io/l1joseph/knightgpt-ingestion`.
+- **`scripts/nrp_batch_ingest.py`** (new): the batch orchestrator.
+  - Phase 1: for each of the 4 paper source lists, resolve DOIs and call the existing download logic (reusing `scripts/download_papers.py`'s resumable per-DOI download, not reimplementing it) for the full combined list — this step alone is cheap to fully re-run on a restart since already-downloaded PDFs are skipped.
+  - Phase 2: partition the downloaded PDFs into fixed-size batches (default 50, configurable), and for each batch call `scripts/ingest_pipeline.py::run_pipeline()`'s convert → chunk → embed → insert logic, scoped to just that batch's PDFs.
+  - Logs a clear per-batch progress line (batch number, paper count, success/failure counts) so `kubectl logs` gives a legible picture of where a long run stands or where a failed run stopped.
+  - Writes a final summary (total papers attempted, succeeded, failed, chunks inserted, edges inserted) at the end, in the same spirit as the existing `pipeline_stats.json` the current pipeline already produces.
+- Reused unchanged: `scripts/download_papers.py`, `scripts/ingest_pipeline.py::run_pipeline()`, `src/graph/postgres_builder.py::insert_chunks()`, `src/embedding/embedder.py::VLLMEmbedder`, `src/graph/duckdb_store.py::DuckDBStore`.
+
+## Data Flow
+
+Job starts → vLLM sidecar boots and loads the embedding model (expect several minutes) → main container's startup waits for the sidecar's health endpoint → orchestrator's Phase 1 downloads all DOIs from all 4 source lists onto the intermediates PVC (skipping anything already present) → Phase 2 loops over fixed-size batches of downloaded PDFs, running each batch through convert → chunk → embed (HTTP to `localhost:8001`) → `insert_chunks()` (text/metadata to Postgres, embeddings to DuckDB, edges via DuckDB neighbor search) → next batch → final summary logged → main container exits → sidecar torn down → Job completes.
+
+## Error Handling
+
+Per-paper failures (a specific PDF fails to download, convert, or chunk) are caught, logged, and counted within their batch — the batch continues with its remaining papers, matching the existing `download_papers.py` pattern and the already-set expectation that PDF fetch success won't be 100%. A batch-level failure (e.g., a transient Postgres/DuckDB connectivity issue affecting `insert_chunks()` for the whole batch) fails that batch's processing; the orchestrator logs which batch failed and why, and a restart of the Job re-runs Phase 1 (cheap, resumable) then Phase 2 from the beginning of Phase 2's batch loop — since Phase 2 itself has no skip-logic (a deliberate scope decision, see Decisions), a restart after a late-batch failure does re-process earlier, already-successful batches. This is an accepted tradeoff for this scope (full-corpus idempotency at the batch level, not the individual-paper level, was explicitly not built) — `insert_chunks()`'s own `ON CONFLICT DO NOTHING` on the Postgres side means re-processing an already-inserted paper's chunks is wasted GPU-time but not data-corrupting.
+
+## Testing
+
+Live-infrastructure verification, consistent with the storage deployment's approach — no new pytest suite:
+- Job completes (`kubectl get job` shows `Complete`, not `Failed`).
+- Final summary log shows a plausible overall success rate (not 0%, not silently skipping the majority of the corpus).
+- Postgres `papers`/`chunks`/`chunk_edges` row counts and DuckDB's row count are checked via the same live-query patterns already used to verify the storage deployment (`kubectl exec ... psql`, a throwaway pod for DuckDB) and roughly match the expected corpus size.
+- A spot-check retrieval: construct a `HybridRetriever` pointed at the NRP storage (from a throwaway debug pod or local port-forward) and confirm a query on a known microbiome topic returns sensible, real results — the actual end-to-end proof that ingestion produced usable data, not just non-zero row counts.

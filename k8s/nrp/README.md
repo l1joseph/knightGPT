@@ -2,10 +2,10 @@
 
 This directory provisions knightGPT's persistent storage on NRP (cluster
 `nautilus`, namespace `knightlab-ml`): a Postgres+pgGraph Deployment, a
-DuckDB PVC, and a weekly backup CronJob. This file documents the fixed
-resource names and the exact environment variables **any future workload in
-this namespace** (the not-yet-built GPU ingestion Job, the not-yet-built MCP
-server, ad hoc debug pods, etc.) must set to connect correctly.
+DuckDB PVC, a weekly backup CronJob, and a GPU-backed ingestion Job. This file
+documents the fixed resource names and the exact environment variables **any
+future workload in this namespace** (the not-yet-built MCP server, ad hoc
+debug pods, etc.) must set to connect correctly.
 
 Manifests and what they own:
 
@@ -17,10 +17,13 @@ Manifests and what they own:
 | `backup-pvc.yaml` | `PersistentVolumeClaim/knightgpt-backup-dest` (RWO, rook-ceph-block) — **never delete**, see warning comment in that file |
 | `backup-cronjob.yaml` | `CronJob/knightgpt-backup` |
 | `duckdb-verify-pod.yaml` | throwaway debug pod pattern for inspecting the DuckDB PVC |
+| `ingestion-pvc.yaml` | `PersistentVolumeClaim/knightgpt-ingestion-data` (RWO, rook-ceph-block) — raw PDFs/markdown/processed intermediates for the ingestion Job; **never delete**, see warning comment in that file |
+| `ingestion-job.yaml` | `Job/knightgpt-ingestion` — GPU-backed (native `vllm/vllm-openai` sidecar + batch orchestrator main container), built and run successfully in production (see "Re-running this Job" below before re-applying) |
 
 Apply order matters where a PVC was split out from its owning workload:
-`kubectl apply -f k8s/nrp/postgres-pvc.yaml -f k8s/nrp/postgres-cluster.yaml`
-and `kubectl apply -f k8s/nrp/backup-pvc.yaml -f k8s/nrp/backup-cronjob.yaml`.
+`kubectl apply -f k8s/nrp/postgres-pvc.yaml -f k8s/nrp/postgres-cluster.yaml`,
+`kubectl apply -f k8s/nrp/backup-pvc.yaml -f k8s/nrp/backup-cronjob.yaml`,
+and `kubectl apply -f k8s/nrp/ingestion-pvc.yaml -f k8s/nrp/ingestion-job.yaml`.
 
 ## Fixed resource names
 
@@ -30,7 +33,15 @@ and `kubectl apply -f k8s/nrp/backup-pvc.yaml -f k8s/nrp/backup-cronjob.yaml`.
   (user is always `postgres`, database is always `knightgpt` — see `postgres-cluster.yaml` env block)
 - **DuckDB PVC:** `knightgpt-duckdb` (RWX — mountable read-write by exactly one writer at a
   time by convention; `DuckDBStore.__init__` raises a clear error on a lock conflict, there
-  is no K8s-level enforcement)
+  is no K8s-level enforcement). **Ownership convention: uid/gid 1000.** The ingestion Job's
+  `fix-duckdb-permissions` init container (`chown -R 1000:1000`, see `ingestion-job.yaml`)
+  established this on first write, because this PVC's storage class (rook-cephfs) does not
+  honor `fsGroup` the way `ingestion-data`'s does — the mount stayed root-owned (0755)
+  without it, and the ingestion container (non-root, uid 1000) failed with a `PermissionError`
+  until this was added. **Any future workload that mounts this PVC as a different uid (e.g.
+  the MCP server) will hit the same `PermissionError` unless it either runs as uid 1000 too,
+  or adds its own equivalent chown init container.** This is not enforced by Kubernetes —
+  it's a convention, easy to silently violate.
 
 ## Required environment variables
 
@@ -118,9 +129,72 @@ spec:
   initial pool creation if this matters to your workload.
 - **DuckDB PVC is RWX but single-writer by convention**, not by K8s enforcement. Never run
   the ingestion Job and an MCP server (or two ingestion Jobs) concurrently against it.
+- **DuckDB PVC is owned by uid/gid 1000** — see the "Fixed resource names" section above.
+  Match that uid or add your own chown init container; don't assume a fresh mount is
+  writable by whatever uid your container runs as.
 - **Node failure recovery is manual**, not automatic — see the Error Handling section of
   `docs/superpowers/specs/2026-08-03-nrp-storage-deployment-design.md`. If Postgres is down
   and its pod is stuck `Terminating`, check for a dead node before assuming a simple crash.
 - **Restoring from backup has a documented, tested procedure** — see `k8s/nrp/RESTORE.md`
   before assuming a plain `psql < backup.sql` restore is safe for pgGraph's registration
   tables.
+
+## Re-running the ingestion Job
+
+`kubectl apply -f k8s/nrp/ingestion-job.yaml` a second time against an already-`Complete`
+Job of the same name **fails** — Kubernetes Jobs are immutable once created (the API
+server rejects most field changes on an existing Job object), so you must delete the old
+Job first:
+
+```bash
+kubectl delete job knightgpt-ingestion -n knightlab-ml
+kubectl apply -f k8s/nrp/ingestion-job.yaml
+```
+
+Deleting the Job does not delete `knightgpt-ingestion-data` or `knightgpt-duckdb` (separate
+PVC manifests, by design — see the warning comment in `ingestion-pvc.yaml`) or anything
+already written to Postgres, so a re-run resumes/adds to existing data rather than starting
+from empty storage; `download_papers()`'s per-DOI skip-if-already-downloaded behavior means
+a re-run is safe to do, not just possible.
+
+**`:latest` is a moving tag.** `ingestion-job.yaml` pins `image:
+ghcr.io/l1joseph/knightgpt-ingestion:latest` with `imagePullPolicy: Always`, so every
+`kubectl apply` pulls whatever `latest` currently points at — merging any branch that
+touches the paths watched by `.github/workflows/build-ingestion-image.yml` (`scripts/**`,
+`src/**`, `docker/Dockerfile.ingestion`, `requirements.txt`, `data/paper_lists/**`)
+triggers a rebuild that moves `latest` to a new image. If reproducing the *exact* bits
+that produced a specific past run matters, use that run's `sha-<commit>` tag instead of
+`latest` — the same workflow pushes both tags on every build (`type=sha,format=long` in
+its `docker/metadata-action` step), so any prior commit's image is still pullable by tag
+even after `latest` has moved on. This isn't done automatically as part of the manifest —
+pinning `ingestion-job.yaml` to a specific `sha-` tag is a judgment call for whoever runs
+the Job next (trade reproducibility against always-latest-code), not something forced by
+default.
+
+The image that produced the corpus currently in Postgres (160 papers, 8,299 chunks, 58,458
+edges, as of this writing) was digest
+`sha256:b19c80cc3ae08140fc61b88330dd3ff6b42c2d064de7b84a3486814f205c6b51` — recorded here
+since nothing else in the repo captures it, and `latest` will have moved past it as soon as
+this branch merges and CI rebuilds.
+
+## Known gap: NRP corpus is not a strict superset of the old Cosmos corpus
+
+The design spec for the ingestion Job assumed the old Cosmos-based 117-paper corpus was
+entirely a subset of `initial_papers.txt`/`zotero_papers.txt`, so a fresh full NRP
+ingestion would naturally re-cover all of it with no separate migration step needed. In
+practice, of those 117 papers, only 111 are present in the new NRP Postgres storage — 6
+failed to re-fetch on this run (transient download failures, not permanently unavailable):
+
+- `10.1038/nature13793`
+- `10.1038/s41579-018-0029-9`
+- `10.1038/s41591-019-0458-7`
+- `10.1080/03014460.2025.2509606`
+- `10.1101/gr.186072.114`
+- `10.1101/gr.213959.116`
+
+These 6 papers' original PDFs/markdown still exist on Cosmos scratch
+(`/cosmos/vast/scratch/l1joseph/knightgpt/data/`) — they are not lost, just absent from the
+NRP storage. If full parity with the old Cosmos corpus matters for a future use case (e.g.
+the MCP server), these 6 would need to be sourced separately (e.g. copied from Cosmos
+scratch and ingested directly) rather than assumed already covered. This is a known,
+accepted gap as of the current run, not an open bug to chase.
