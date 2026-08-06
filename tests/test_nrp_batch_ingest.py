@@ -1,6 +1,7 @@
 """Unit tests for the NRP batch ingestion orchestrator."""
 
 import pytest
+from unittest.mock import MagicMock, patch
 
 
 @pytest.mark.unit
@@ -122,3 +123,52 @@ def test_all_embeddings_missing_false_for_empty_list():
     from scripts.nrp_batch_ingest import all_embeddings_missing
 
     assert all_embeddings_missing([]) is False
+
+
+@pytest.mark.unit
+def test_wait_for_embedder_ready_returns_immediately_when_healthy():
+    from scripts.nrp_batch_ingest import wait_for_embedder_ready
+
+    embedder = MagicMock()
+    embedder.check_health.return_value = True
+
+    with patch("scripts.nrp_batch_ingest.time.sleep") as mock_sleep:
+        wait_for_embedder_ready(embedder, timeout_s=60, poll_interval_s=10)
+
+    embedder.check_health.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
+@pytest.mark.unit
+def test_wait_for_embedder_ready_polls_until_healthy():
+    from scripts.nrp_batch_ingest import wait_for_embedder_ready
+
+    embedder = MagicMock()
+    embedder.check_health.side_effect = [False, False, True]
+
+    with patch("scripts.nrp_batch_ingest.time.sleep") as mock_sleep:
+        wait_for_embedder_ready(embedder, timeout_s=60, poll_interval_s=10)
+
+    assert embedder.check_health.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+@pytest.mark.unit
+def test_wait_for_embedder_ready_raises_on_timeout():
+    from scripts.nrp_batch_ingest import wait_for_embedder_ready
+
+    embedder = MagicMock()
+    embedder.check_health.return_value = False
+
+    # Simulate time passing without a real sleep: monotonic() is called once
+    # up front for the deadline, then once per loop iteration.
+    fake_times = iter([0, 1, 61, 121])
+    with (
+        patch("scripts.nrp_batch_ingest.time.sleep"),
+        patch(
+            "scripts.nrp_batch_ingest.time.monotonic",
+            side_effect=lambda: next(fake_times),
+        ),
+        pytest.raises(RuntimeError, match="did not become ready"),
+    ):
+        wait_for_embedder_ready(embedder, timeout_s=60, poll_interval_s=10)

@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +47,18 @@ DEFAULT_PAPER_LISTS = [
 ]
 LONGREAD_TSV = Path("data/paper_lists/sources/longread_bioprojects.tsv")
 LONGREAD_DERIVED = Path("data/paper_lists/longread_papers.txt")
+
+# Bounded wait for the vLLM embedding sidecar to finish loading before Phase 2
+# starts (see wait_for_embedder_ready's docstring for why this is needed at
+# all). Budget: the manifest's own readinessProbe gives the sidecar
+# failureThreshold(30) * periodSeconds(10) = 300s to become ready after its
+# initialDelaySeconds(30) -- i.e. ~330s end-to-end -- before Kubernetes itself
+# would give up on it. 600s (10 min) here is that budget plus margin, since
+# this check runs from a different starting point (whenever Phase 1 finishes,
+# not container start) and a slow model load is exactly the case this exists
+# to tolerate.
+EMBEDDER_READY_TIMEOUT_S = 600
+EMBEDDER_READY_POLL_INTERVAL_S = 15
 
 
 def partition_into_batches(items: list, batch_size: int) -> list[list]:
@@ -116,6 +129,61 @@ def download_all_sources(paper_lists: list[Path]) -> dict:
     return combined_stats
 
 
+def wait_for_embedder_ready(
+    embedder: VLLMEmbedder,
+    timeout_s: float = EMBEDDER_READY_TIMEOUT_S,
+    poll_interval_s: float = EMBEDDER_READY_POLL_INTERVAL_S,
+) -> None:
+    """Block until the vLLM embedding sidecar responds to a real health check,
+    or raise. Must be called after Phase 1 (download) and before Phase 2's
+    batch loop starts making embed_chunks() calls.
+
+    Why this is needed: the vLLM sidecar in k8s/nrp/ingestion-job.yaml is a
+    native sidecar (K8s 1.29+, `restartPolicy: Always` on the init container).
+    Kubelet starts the main `ingestion` container as soon as the sidecar has
+    *started*, not once its readinessProbe passes -- the readinessProbe only
+    gates the Service/Job-level view of the sidecar, it does not block the main
+    container from running. Without an explicit wait here, the main container
+    can reach the batch loop before vLLM has finished loading the ~7B
+    embedding model into GPU memory, and every embed_chunks() call in that
+    window fails.
+
+    In the one live run so far this raced safely by luck: Phase 1 (download)
+    happened to take ~8 minutes due to real network failures, which was enough
+    time for the model to finish loading in the background. That's not
+    something to rely on -- a future run where Phase 1 finishes quickly (e.g.
+    all DOIs already cached) would hit the race for real.
+
+    Raises:
+        RuntimeError: if the embedder isn't healthy within timeout_s. This is
+            intentionally fatal for the whole run rather than a per-batch
+            retry -- without a working embedder nothing downstream can
+            succeed, so failing fast here is more useful than discovering it
+            batch-by-batch.
+    """
+    logger.info(
+        f"Waiting for vLLM embedding server to become ready "
+        f"(timeout={timeout_s}s, poll every {poll_interval_s}s)"
+    )
+    deadline = time.monotonic() + timeout_s
+    attempt = 0
+    while True:
+        attempt += 1
+        if embedder.check_health():
+            logger.info(f"vLLM embedding server ready after {attempt} check(s)")
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"vLLM embedding server did not become ready within {timeout_s}s "
+                f"({attempt} checks) -- aborting before Phase 2 batch processing"
+            )
+        logger.info(
+            f"vLLM embedding server not ready yet (check {attempt}), "
+            f"retrying in {poll_interval_s}s"
+        )
+        time.sleep(poll_interval_s)
+
+
 async def _insert_batch(chunks: list[Chunk], papers: dict, store: DuckDBStore) -> dict:
     """Insert one batch's chunks into Postgres+DuckDB. Owns its own pool
     for the lifetime of this one batch (matches run_pipeline()'s existing
@@ -152,6 +220,7 @@ def run_batch_ingestion(
     doi_lookup = build_doi_lookup()
     chunker = SemanticChunker()
     embedder = VLLMEmbedder()
+    wait_for_embedder_ready(embedder)
     store = DuckDBStore(str(settings.ingestion.duckdb_path))
 
     batch_results = []
@@ -191,17 +260,34 @@ def run_batch_ingestion(
                     f"Batch {i}: embedding produced no results for any of {len(batch_chunks)} chunks "
                     f"-- likely a vLLM embedding server outage, treating as a batch-level failure"
                 )
+
+            # Partial degradation (some, but not all, chunks failed to embed) isn't
+            # fatal -- unlike the total-outage case above, insert_chunks() just
+            # silently drops each embedding-less chunk (logger.warning only, see
+            # src/graph/postgres_builder.py). Surface it here so it's visible in
+            # this batch's logs and in the final stats JSON, instead of a
+            # "successful" batch quietly losing chunks with no trace.
+            embedding_failures = sum(1 for c in batch_chunks if c.embedding is None)
+            if embedding_failures:
+                pct = 100 * embedding_failures / len(batch_chunks)
+                logger.warning(
+                    f"Batch {i}: {embedding_failures}/{len(batch_chunks)} "
+                    f"({pct:.1f}%) chunks failed to embed and will be dropped"
+                )
+
             papers = build_papers_dict(batch_chunks, doi_lookup)
             insert_stats = asyncio.run(_insert_batch(batch_chunks, papers, store))
 
             logger.info(
-                f"Batch {i}/{len(batches)} done: {insert_stats}, paper_failures={paper_failures}"
+                f"Batch {i}/{len(batches)} done: {insert_stats}, paper_failures={paper_failures}, "
+                f"embedding_failures={embedding_failures}"
             )
             batch_results.append(
                 {
                     "batch": i,
                     "papers": len(batch_files),
                     "paper_failures": paper_failures,
+                    "embedding_failures": embedding_failures,
                     **insert_stats,
                 }
             )
