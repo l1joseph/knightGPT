@@ -84,7 +84,7 @@ spec:
         - name: ingestion
           image: ghcr.io/l1joseph/knightgpt-ingestion:latest
           imagePullPolicy: Always
-          command: ["python", "scripts/nrp_batch_ingest.py", "--max-papers", "20", "--log-level", "INFO"]
+          command: ["python", "scripts/nrp_batch_ingest.py", "--log-level", "INFO"]
           env:
             # POSTGRES_PASSWORD must come BEFORE POSTGRES_DSN -- Kubernetes only expands
             # $(VAR) references to env vars defined earlier in the same container's env
