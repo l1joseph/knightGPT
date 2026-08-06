@@ -638,13 +638,19 @@ spec:
           imagePullPolicy: Always
           command: ["python", "scripts/nrp_batch_ingest.py", "--max-papers", "20", "--log-level", "INFO"]
           env:
-            - name: POSTGRES_DSN
-              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
+            # POSTGRES_PASSWORD must come BEFORE POSTGRES_DSN in this list -- Kubernetes only
+            # expands $(VAR) references to env vars defined earlier in the same container's
+            # env list (see k8s/nrp/README.md's own documented example, which has this
+            # right). Getting the order backwards means $(POSTGRES_PASSWORD) is never
+            # substituted -- the literal string is sent as the password, producing a real
+            # InvalidPasswordError from Postgres, not a client-side/DSN-parsing error.
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: knightgpt-postgres-credentials
                   key: POSTGRES_PASSWORD
+            - name: POSTGRES_DSN
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
             - name: INGEST_RAW_PDF_DIR
               value: /data/raw_pdfs
             - name: INGEST_MARKDOWN_DIR
@@ -678,7 +684,7 @@ spec:
             claimName: knightgpt-duckdb
 ```
 
-Note `command: [..., "--max-papers", "20", ...]` — this task validates the Job's wiring cheaply (20 papers, not the full ~900) before Task 5 commits to a full-scale, multi-hour, GPU-consuming run. Note also that `POSTGRES_DSN`'s value uses `$(POSTGRES_PASSWORD)` Kubernetes env-var interpolation syntax, referencing the `POSTGRES_PASSWORD` env var defined immediately above it in the same `env:` list — confirm this resolves correctly in Step 4 below; if the generated password happens to contain a character that's invalid in this position of a URI (`@`, `:`, `/`, `#` — the same caveat `k8s/nrp/README.md` already documents), this will produce a malformed DSN and needs handling (see Step 4's troubleshooting note).
+Note `command: [..., "--max-papers", "20", ...]` — this task validates the Job's wiring cheaply (20 papers, not the full ~900) before Task 5 commits to a full-scale, multi-hour, GPU-consuming run. Note also that `POSTGRES_DSN`'s value uses `$(POSTGRES_PASSWORD)` Kubernetes env-var interpolation syntax, referencing the `POSTGRES_PASSWORD` env var defined immediately above it in the same `env:` list — this ordering is load-bearing, not cosmetic: Kubernetes only expands `$(VAR)` for vars defined earlier in the list, so `POSTGRES_PASSWORD` must stay first. Confirm this resolves correctly in Step 4 below; if the generated password happens to contain a character that's invalid in this position of a URI (`@`, `:`, `/`, `#` — the same caveat `k8s/nrp/README.md` already documents), this will produce a malformed DSN and needs handling (see Step 4's troubleshooting note).
 
 - [ ] **Step 3: Apply both manifests**
 

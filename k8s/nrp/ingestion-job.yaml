@@ -86,13 +86,20 @@ spec:
           imagePullPolicy: Always
           command: ["python", "scripts/nrp_batch_ingest.py", "--max-papers", "20", "--log-level", "INFO"]
           env:
-            - name: POSTGRES_DSN
-              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
+            # POSTGRES_PASSWORD must come BEFORE POSTGRES_DSN -- Kubernetes only expands
+            # $(VAR) references to env vars defined earlier in the same container's env
+            # list (see k8s/nrp/README.md's own documented example). The original order
+            # here had this backwards: $(POSTGRES_PASSWORD) was never substituted, so the
+            # literal string was sent as the password, producing a real, reproducible
+            # InvalidPasswordError from Postgres on a live validation run -- not a
+            # DSN-parsing or client-side issue.
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: knightgpt-postgres-credentials
                   key: POSTGRES_PASSWORD
+            - name: POSTGRES_DSN
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
             - name: INGEST_RAW_PDF_DIR
               value: /data/raw_pdfs
             - name: INGEST_MARKDOWN_DIR
