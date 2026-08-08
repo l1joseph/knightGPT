@@ -193,6 +193,10 @@ which contexts each study appeared in. It deliberately leaves
 are a separate, future Stage 2 backfill via direct Postgres access to Qiita's
 own database, not attempted here. This is a one-time run, not a CronJob.
 
+**Prerequisite:** this Job does not create its own table — `qiita_studies`
+must already exist before applying `qiita-registry-ingest-job.yaml` (create it
+by running `scripts/apply_schema.py` against `sql/schema.sql`).
+
 ### Live-run history — three runs, read all three before touching this Job again
 
 **Run 1 (2026-08-08 03:59-05:02 UTC): failed, zero rows.** The original
@@ -279,9 +283,7 @@ ordinary transient per-context failure). **Re-running this Job
 (`kubectl delete job ... && kubectl apply -f ...`) is idempotent** and,
 given the current fast per-context cost, should be safe and cheap to redo
 periodically if desired (though it remains a manually-triggered one-time
-Job, not a CronJob, per the original design). See
-`.superpowers/sdd/2026-08-07-qiita-registry-ingestion/task-5-report.md` for
-the full command-by-command record of all three live runs.
+Job, not a CronJob, per the original design).
 
 ## Known gap: NRP corpus is not a strict superset of the old Cosmos corpus
 

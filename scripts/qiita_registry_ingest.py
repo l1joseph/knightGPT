@@ -153,6 +153,8 @@ async def _run_registry_ingest_async() -> dict:
 
     context_results: dict[str, dict[int, int]] = {}
     context_failures = 0
+    checkpoint_failures = 0
+    rows_upserted = 0
 
     pool = await get_pg_pool()
     try:
@@ -166,6 +168,13 @@ async def _run_registry_ingest_async() -> dict:
                 completed += 1
                 try:
                     counts = future.result()
+                except subprocess.CalledProcessError as e:
+                    logger.exception(
+                        f"[{completed}/{len(contexts)}] {context_name} failed, skipping "
+                        f"(stderr: {e.stderr!r})"
+                    )
+                    context_failures += 1
+                    continue
                 except Exception:
                     logger.exception(f"[{completed}/{len(contexts)}] {context_name} failed, skipping")
                     context_failures += 1
@@ -193,12 +202,13 @@ async def _run_registry_ingest_async() -> dict:
                     # from a redbiom fetch/summarize failure, so it does not
                     # increment context_failures.
                     try:
-                        await _upsert_registry(pool, affected)
+                        rows_upserted += await _upsert_registry(pool, affected)
                     except Exception:
                         logger.exception(
                             f"[{completed}/{len(contexts)}] checkpoint upsert failed for "
                             f"{context_name}, continuing"
                         )
+                        checkpoint_failures += 1
     finally:
         await pool.close()
 
@@ -208,10 +218,20 @@ async def _run_registry_ingest_async() -> dict:
             "whole-run failure rather than reporting an empty registry"
         )
 
+    if context_results and rows_upserted == 0 and checkpoint_failures > 0:
+        raise RuntimeError(
+            f"redbiom fetching succeeded for {len(context_results)} context(s), but all "
+            f"{checkpoint_failures} checkpoint upsert(s) failed -- zero rows were ever "
+            "persisted to Postgres (e.g. qiita_studies may not exist yet -- run "
+            "scripts/apply_schema.py against sql/schema.sql first). Treating as a "
+            "whole-run failure rather than exiting 0 over an empty table."
+        )
+
     final_registry = merge_context_results(context_results)
     logger.info(
         f"Final: {len(final_registry)} distinct studies across {len(context_results)} contexts, "
-        f"{context_failures} context failures"
+        f"{context_failures} context failures, {rows_upserted} rows upserted, "
+        f"{checkpoint_failures} checkpoint failures"
     )
 
     return {
@@ -219,6 +239,8 @@ async def _run_registry_ingest_async() -> dict:
         "contexts_succeeded": len(context_results),
         "contexts_failed": context_failures,
         "studies_found": len(final_registry),
+        "rows_upserted": rows_upserted,
+        "checkpoint_failures": checkpoint_failures,
     }
 
 
@@ -261,6 +283,8 @@ def main():
     print("\nQiita Registry Ingestion Summary:")
     print(f"  Contexts: {summary['contexts_succeeded']}/{summary['contexts_total']} succeeded")
     print(f"  Studies found: {summary['studies_found']}")
+    print(f"  Rows upserted: {summary['rows_upserted']}")
+    print(f"  Checkpoint failures: {summary['checkpoint_failures']}")
 
 
 if __name__ == "__main__":
