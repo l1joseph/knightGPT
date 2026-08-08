@@ -22,6 +22,42 @@ CREATE TABLE IF NOT EXISTS chunk_edges (
     PRIMARY KEY (src_chunk_id, dst_chunk_id)
 );
 
+CREATE TABLE IF NOT EXISTS qiita_studies (
+    study_id                bigint PRIMARY KEY,
+    sample_count            integer NOT NULL,
+    contexts                jsonb NOT NULL DEFAULT '[]'::jsonb,
+    title                   text,
+    abstract                text,
+    principal_investigator  text,
+    funding                 text,
+    metadata                jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ingested_at             timestamptz NOT NULL DEFAULT now(),
+    metadata_backfilled_at  timestamptz
+);
+
+COMMENT ON TABLE qiita_studies IS
+    'Stage 1 registry of Qiita studies, seeded from redbiom''s public index by '
+    'scripts/qiita_registry_ingest.py. title/abstract/principal_investigator/'
+    'funding/metadata are left NULL by Stage 1 -- a separate, future Stage 2 '
+    'backfills them via direct Postgres access to Qiita''s own database.';
+
+COMMENT ON COLUMN qiita_studies.sample_count IS
+    'Sum of per-context sample counts, NOT a distinct/deduplicated sample '
+    'count. A study reprocessed under multiple redbiom contexts (different '
+    'pipeline variants run over the same physical samples) has its samples '
+    'counted once per context, inflating this total -- e.g. study 12949 has '
+    'sample_count = 103662 across 6 contexts, versus 17277 for any single '
+    'context (6x). See merge_context_results() in '
+    'scripts/qiita_registry_ingest.py.';
+
+COMMENT ON COLUMN qiita_studies.study_id IS
+    'Parsed from the leading numeric prefix of each redbiom sample ID '
+    '(format <study_id>.<sample_name>), NOT queried from redbiom''s official '
+    'qiita_study_id metadata field -- a deliberate Stage 1 simplification for '
+    'performance, with a small chance of mismatch for "ambiguous" sample IDs. '
+    'See the "KNOWN SIMPLIFICATION" block in '
+    'scripts/qiita_registry_ingest.py for full detail.';
+
 -- pgGraph registration: chunks as nodes, chunk_edges as an edge-table relationship.
 -- Idempotency is not assumed from pgGraph itself; each registration is wrapped
 -- in its own DO block so re-running this file against an already-provisioned

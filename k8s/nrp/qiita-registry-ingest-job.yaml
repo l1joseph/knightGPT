@@ -1,0 +1,69 @@
+# k8s/nrp/qiita-registry-ingest-job.yaml
+#
+# One-time Job: seeds qiita_studies from redbiom's public index. No GPU,
+# no sidecar, no PVC -- lightweight HTTP calls to redbiom's public backend
+# (http://qiita.ucsd.edu:7329) plus a handful of Postgres writes.
+#
+# Re-running: Kubernetes Jobs are immutable, so re-applying this over an
+# already-Complete Job of the same name fails. Delete first:
+#   kubectl delete job knightgpt-qiita-registry-ingest -n knightlab-ml && kubectl apply -f k8s/nrp/qiita-registry-ingest-job.yaml
+# This is idempotent to re-run -- the upsert in scripts/qiita_registry_ingest.py
+# only updates sample_count/contexts/ingested_at, never touching any
+# Stage-2-backfilled metadata columns.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: knightgpt-qiita-registry-ingest
+  namespace: knightlab-ml
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 21600  # 6 hours -- was revised up from an original 1-hour estimate
+                                  # after a live run (Run 2) showed that was badly wrong under
+                                  # the then-current design, which relied on a slow `redbiom
+                                  # summarize samples` call per context. That call was
+                                  # eliminated entirely in a later fix (parses the study ID
+                                  # straight out of each sample ID's prefix instead), and the
+                                  # confirmed real runtime as of Run 3 is 5m43s for the full
+                                  # 357 contexts -- see k8s/nrp/README.md's "Run 3" section for
+                                  # the exact numbers. 21600s is therefore generous headroom,
+                                  # not a reflection of genuine runtime uncertainty; left this
+                                  # high anyway since it costs nothing and NRP policy requires
+                                  # Jobs to run a command that terminates on its own -- this is
+                                  # just the hard backstop. The orchestrator also checkpoints
+                                  # to Postgres incrementally after every context (see
+                                  # scripts/qiita_registry_ingest.py), so even a run that did
+                                  # hit this deadline would keep whatever progress it made
+                                  # rather than losing it all.
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: qiita-registry-ingest
+          image: ghcr.io/l1joseph/knightgpt-qiita-registry:latest
+          imagePullPolicy: Always
+          command: ["python", "scripts/qiita_registry_ingest.py", "--log-level", "INFO"]
+          env:
+            # POSTGRES_PASSWORD must come BEFORE POSTGRES_DSN -- Kubernetes only
+            # expands $(VAR) references to env vars defined earlier in the same
+            # container's env list. Getting this backwards caused a real,
+            # reproducible InvalidPasswordError in the prior ingestion-job
+            # sub-project (see k8s/nrp/ingestion-job.yaml's own comment on this).
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knightgpt-postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DSN
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
+          resources:  # requests == limits (ratio 1.0) to satisfy this namespace's Gatekeeper
+                      # container-must-meet-memory-and-cpu-ratio policy. Bumped from the
+                      # original 1 CPU / 2Gi -- the orchestrator now runs MAX_WORKERS=5
+                      # concurrent redbiom subprocess workers (see
+                      # scripts/qiita_registry_ingest.py) instead of one at a time, needing
+                      # more headroom than the original single-threaded design assumed.
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
