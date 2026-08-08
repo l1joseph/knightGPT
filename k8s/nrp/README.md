@@ -193,7 +193,7 @@ which contexts each study appeared in. It deliberately leaves
 are a separate, future Stage 2 backfill via direct Postgres access to Qiita's
 own database, not attempted here. This is a one-time run, not a CronJob.
 
-### Live-run history — two runs, read both before touching this Job again
+### Live-run history — three runs, read all three before touching this Job again
 
 **Run 1 (2026-08-08 03:59-05:02 UTC): failed, zero rows.** The original
 single-threaded orchestrator (`REDBIOM_TIMEOUT_S = 120`, no concurrency, a

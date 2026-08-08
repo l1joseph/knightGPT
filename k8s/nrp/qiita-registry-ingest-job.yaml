@@ -17,21 +17,23 @@ metadata:
   namespace: knightlab-ml
 spec:
   backoffLimit: 2
-  activeDeadlineSeconds: 21600  # 6 hours -- revised up from an original 1-hour estimate
-                                  # after a live run showed that was badly wrong: the
-                                  # ~12s-for-a-300k-sample-context figure that estimate was
-                                  # based on did not hold against redbiom's live public
-                                  # endpoint, where individual `redbiom summarize samples`
-                                  # calls were observed taking multiple minutes, not
-                                  # seconds. Real total wall-clock time across ~358 contexts
-                                  # is genuinely uncertain, so this is a generous ceiling
-                                  # rather than a confident estimate. The orchestrator now
-                                  # checkpoints to Postgres incrementally after every
-                                  # context (see scripts/qiita_registry_ingest.py), so even
-                                  # a run that hits this deadline keeps whatever progress it
-                                  # made rather than losing it all. NRP policy requires Jobs
-                                  # to run a command that terminates on its own -- this is
-                                  # the hard backstop.
+  activeDeadlineSeconds: 21600  # 6 hours -- was revised up from an original 1-hour estimate
+                                  # after a live run (Run 2) showed that was badly wrong under
+                                  # the then-current design, which relied on a slow `redbiom
+                                  # summarize samples` call per context. That call was
+                                  # eliminated entirely in a later fix (parses the study ID
+                                  # straight out of each sample ID's prefix instead), and the
+                                  # confirmed real runtime as of Run 3 is 5m43s for the full
+                                  # 357 contexts -- see k8s/nrp/README.md's "Run 3" section for
+                                  # the exact numbers. 21600s is therefore generous headroom,
+                                  # not a reflection of genuine runtime uncertainty; left this
+                                  # high anyway since it costs nothing and NRP policy requires
+                                  # Jobs to run a command that terminates on its own -- this is
+                                  # just the hard backstop. The orchestrator also checkpoints
+                                  # to Postgres incrementally after every context (see
+                                  # scripts/qiita_registry_ingest.py), so even a run that did
+                                  # hit this deadline would keep whatever progress it made
+                                  # rather than losing it all.
   template:
     spec:
       restartPolicy: Never
