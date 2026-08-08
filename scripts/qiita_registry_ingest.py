@@ -114,50 +114,38 @@ def fetch_and_summarize_context(context_name: str) -> dict[int, int]:
         return parse_study_counts(summarize_result.stdout)
 
 
-async def _upsert_registry(registry: dict[int, dict]) -> int:
-    """Upsert the merged registry into qiita_studies. Deliberately does
-    NOT touch title/abstract/principal_investigator/funding/metadata/
+async def _upsert_registry(pool, registry: dict[int, dict]) -> int:
+    """Upsert the merged registry into qiita_studies using an existing pool
+    (the caller owns the pool's lifecycle -- this function does not create
+    or close it). Deliberately does NOT touch
+    title/abstract/principal_investigator/funding/metadata/
     metadata_backfilled_at, so a re-run never clobbers a future Stage 2
     backfill. Returns the number of rows upserted."""
-    pool = await get_pg_pool()
-    try:
-        async with pool.acquire() as conn:
-            for study_id, data in registry.items():
-                await conn.execute(
-                    """
-                    INSERT INTO qiita_studies (study_id, sample_count, contexts)
-                    VALUES ($1, $2, $3::jsonb)
-                    ON CONFLICT (study_id) DO UPDATE SET
-                        sample_count = EXCLUDED.sample_count,
-                        contexts = EXCLUDED.contexts,
-                        ingested_at = now()
-                    """,
-                    study_id,
-                    data["sample_count"],
-                    json.dumps(data["contexts"]),
-                )
-        return len(registry)
-    finally:
-        await pool.close()
+    async with pool.acquire() as conn:
+        for study_id, data in registry.items():
+            await conn.execute(
+                """
+                INSERT INTO qiita_studies (study_id, sample_count, contexts)
+                VALUES ($1, $2, $3::jsonb)
+                ON CONFLICT (study_id) DO UPDATE SET
+                    sample_count = EXCLUDED.sample_count,
+                    contexts = EXCLUDED.contexts,
+                    ingested_at = now()
+                """,
+                study_id,
+                data["sample_count"],
+                json.dumps(data["contexts"]),
+            )
+    return len(registry)
 
 
-def run_registry_ingest() -> dict:
-    """Run the full Stage 1 ingestion: enumerate contexts, fetch+summarize
-    each concurrently (MAX_WORKERS threads -- this is I/O-bound subprocess
-    work, and redbiom's backend is a shared public resource, so worker
-    count is kept modest), checkpointing to Postgres after every context
-    completes rather than only once at the very end. Per-context failures
-    are logged and non-fatal; if every context fails, raises (whole-run
-    failure) rather than reporting an empty registry.
-
-    Each checkpoint write recomputes the full in-memory cumulative merge
-    from all context results seen so far and upserts only the studies the
-    just-completed context touched, using the existing overwrite-based
-    upsert SQL (never additive). Because every write always contains the
-    true, complete cumulative total rather than an increment, this is safe
-    and idempotent even on a full re-run from scratch -- identical
-    correctness guarantee to upserting once at the end, just checkpointed
-    incrementally so a mid-run deadline/kill doesn't discard all progress.
+async def _run_registry_ingest_async() -> dict:
+    """Async implementation of the full Stage 1 ingestion, run start-to-
+    finish on a single event loop so the Postgres pool created here stays
+    valid for every checkpoint (asyncpg pools are bound to the loop they
+    were created on -- calling asyncio.run() separately for each checkpoint
+    would create a fresh loop each time and break pool reuse). See
+    run_registry_ingest() for the full behavioral description.
     """
     contexts = list_contexts()
     logger.info(f"Found {len(contexts)} redbiom contexts")
@@ -165,36 +153,53 @@ def run_registry_ingest() -> dict:
     context_results: dict[str, dict[int, int]] = {}
     context_failures = 0
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_context = {
-            executor.submit(fetch_and_summarize_context, ctx): ctx for ctx in contexts
-        }
-        completed = 0
-        for future in concurrent.futures.as_completed(future_to_context):
-            context_name = future_to_context[future]
-            completed += 1
-            try:
-                counts = future.result()
-            except Exception:
-                logger.exception(f"[{completed}/{len(contexts)}] {context_name} failed, skipping")
-                context_failures += 1
-                continue
-
-            context_results[context_name] = counts
-            logger.info(f"[{completed}/{len(contexts)}] {context_name}: {len(counts)} studies")
-
-            # Incremental checkpoint: recompute the true cumulative state and
-            # persist only the studies this context touched. Safe to re-run
-            # from scratch -- each write is always the complete cumulative
-            # total, never an increment, so there's no double-counting risk.
-            registry = merge_context_results(context_results)
-            affected = {
-                study_id: data
-                for study_id, data in registry.items()
-                if context_name in data["contexts"]
+    pool = await get_pg_pool()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_context = {
+                executor.submit(fetch_and_summarize_context, ctx): ctx for ctx in contexts
             }
-            if affected:
-                asyncio.run(_upsert_registry(affected))
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_context):
+                context_name = future_to_context[future]
+                completed += 1
+                try:
+                    counts = future.result()
+                except Exception:
+                    logger.exception(f"[{completed}/{len(contexts)}] {context_name} failed, skipping")
+                    context_failures += 1
+                    continue
+
+                context_results[context_name] = counts
+                logger.info(f"[{completed}/{len(contexts)}] {context_name}: {len(counts)} studies")
+
+                # Incremental checkpoint: recompute the true cumulative state
+                # and persist only the studies this context touched. Safe to
+                # re-run from scratch -- each write is always the complete
+                # cumulative total, never an increment, so there's no
+                # double-counting risk.
+                registry = merge_context_results(context_results)
+                affected = {
+                    study_id: data
+                    for study_id, data in registry.items()
+                    if context_name in data["contexts"]
+                }
+                if affected:
+                    # A single flaky checkpoint write shouldn't kill the
+                    # whole run -- the data was already fetched fine, it'll
+                    # get picked up again by the next context's cumulative
+                    # recompute-and-upsert. This is a distinct failure mode
+                    # from a redbiom fetch/summarize failure, so it does not
+                    # increment context_failures.
+                    try:
+                        await _upsert_registry(pool, affected)
+                    except Exception:
+                        logger.exception(
+                            f"[{completed}/{len(contexts)}] checkpoint upsert failed for "
+                            f"{context_name}, continuing"
+                        )
+    finally:
+        await pool.close()
 
     if not context_results and context_failures > 0:
         raise RuntimeError(
@@ -214,6 +219,34 @@ def run_registry_ingest() -> dict:
         "contexts_failed": context_failures,
         "studies_found": len(final_registry),
     }
+
+
+def run_registry_ingest() -> dict:
+    """Run the full Stage 1 ingestion: enumerate contexts, fetch+summarize
+    each concurrently (MAX_WORKERS threads -- this is I/O-bound subprocess
+    work, and redbiom's backend is a shared public resource, so worker
+    count is kept modest), checkpointing to Postgres after every context
+    completes rather than only once at the very end. Per-context failures
+    are logged and non-fatal; if every context fails, raises (whole-run
+    failure) rather than reporting an empty registry.
+
+    A single Postgres connection pool is created once for the whole run
+    and reused across every checkpoint (rather than reconnecting per
+    checkpoint), and a single checkpoint write failing (e.g. a transient
+    Postgres blip) does not abort the run -- it's logged and the run keeps
+    going, since that context's data will be re-persisted by the next
+    context's cumulative recompute-and-upsert anyway.
+
+    Each checkpoint write recomputes the full in-memory cumulative merge
+    from all context results seen so far and upserts only the studies the
+    just-completed context touched, using the existing overwrite-based
+    upsert SQL (never additive). Because every write always contains the
+    true, complete cumulative total rather than an increment, this is safe
+    and idempotent even on a full re-run from scratch -- identical
+    correctness guarantee to upserting once at the end, just checkpointed
+    incrementally so a mid-run deadline/kill doesn't discard all progress.
+    """
+    return asyncio.run(_run_registry_ingest_async())
 
 
 def main():
