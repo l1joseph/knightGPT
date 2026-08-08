@@ -13,6 +13,7 @@ once direct Postgres access to Qiita's own database is available.
 
 import argparse
 import asyncio
+import concurrent.futures
 import json
 import subprocess
 import sys
@@ -25,7 +26,8 @@ from src.utils import get_logger, get_pg_pool, setup_logging
 
 logger = get_logger(__name__)
 
-REDBIOM_TIMEOUT_S = 120
+REDBIOM_TIMEOUT_S = 300
+MAX_WORKERS = 5
 
 
 def parse_study_counts(summarize_output: str) -> dict[int, int]:
@@ -141,41 +143,76 @@ async def _upsert_registry(registry: dict[int, dict]) -> int:
 
 def run_registry_ingest() -> dict:
     """Run the full Stage 1 ingestion: enumerate contexts, fetch+summarize
-    each, merge across contexts, upsert into Postgres. Per-context
-    failures are logged and non-fatal; if every context fails, raises
-    (whole-run failure) rather than upserting an empty registry."""
+    each concurrently (MAX_WORKERS threads -- this is I/O-bound subprocess
+    work, and redbiom's backend is a shared public resource, so worker
+    count is kept modest), checkpointing to Postgres after every context
+    completes rather than only once at the very end. Per-context failures
+    are logged and non-fatal; if every context fails, raises (whole-run
+    failure) rather than reporting an empty registry.
+
+    Each checkpoint write recomputes the full in-memory cumulative merge
+    from all context results seen so far and upserts only the studies the
+    just-completed context touched, using the existing overwrite-based
+    upsert SQL (never additive). Because every write always contains the
+    true, complete cumulative total rather than an increment, this is safe
+    and idempotent even on a full re-run from scratch -- identical
+    correctness guarantee to upserting once at the end, just checkpointed
+    incrementally so a mid-run deadline/kill doesn't discard all progress.
+    """
     contexts = list_contexts()
     logger.info(f"Found {len(contexts)} redbiom contexts")
 
     context_results: dict[str, dict[int, int]] = {}
     context_failures = 0
-    for i, context_name in enumerate(contexts, 1):
-        try:
-            counts = fetch_and_summarize_context(context_name)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_context = {
+            executor.submit(fetch_and_summarize_context, ctx): ctx for ctx in contexts
+        }
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_context):
+            context_name = future_to_context[future]
+            completed += 1
+            try:
+                counts = future.result()
+            except Exception:
+                logger.exception(f"[{completed}/{len(contexts)}] {context_name} failed, skipping")
+                context_failures += 1
+                continue
+
             context_results[context_name] = counts
-            logger.info(f"[{i}/{len(contexts)}] {context_name}: {len(counts)} studies")
-        except Exception:
-            logger.exception(f"[{i}/{len(contexts)}] {context_name} failed, skipping")
-            context_failures += 1
+            logger.info(f"[{completed}/{len(contexts)}] {context_name}: {len(counts)} studies")
+
+            # Incremental checkpoint: recompute the true cumulative state and
+            # persist only the studies this context touched. Safe to re-run
+            # from scratch -- each write is always the complete cumulative
+            # total, never an increment, so there's no double-counting risk.
+            registry = merge_context_results(context_results)
+            affected = {
+                study_id: data
+                for study_id, data in registry.items()
+                if context_name in data["contexts"]
+            }
+            if affected:
+                asyncio.run(_upsert_registry(affected))
 
     if not context_results and context_failures > 0:
         raise RuntimeError(
             f"All {context_failures} redbiom contexts failed -- treating as a "
-            "whole-run failure rather than upserting an empty registry"
+            "whole-run failure rather than reporting an empty registry"
         )
 
-    registry = merge_context_results(context_results)
-    logger.info(f"Merged registry: {len(registry)} distinct studies across {len(context_results)} contexts")
-
-    rows_upserted = asyncio.run(_upsert_registry(registry))
-    logger.info(f"Upserted {rows_upserted} rows into qiita_studies")
+    final_registry = merge_context_results(context_results)
+    logger.info(
+        f"Final: {len(final_registry)} distinct studies across {len(context_results)} contexts, "
+        f"{context_failures} context failures"
+    )
 
     return {
         "contexts_total": len(contexts),
         "contexts_succeeded": len(context_results),
         "contexts_failed": context_failures,
-        "studies_found": len(registry),
-        "rows_upserted": rows_upserted,
+        "studies_found": len(final_registry),
     }
 
 
@@ -190,7 +227,6 @@ def main():
     print("\nQiita Registry Ingestion Summary:")
     print(f"  Contexts: {summary['contexts_succeeded']}/{summary['contexts_total']} succeeded")
     print(f"  Studies found: {summary['studies_found']}")
-    print(f"  Rows upserted: {summary['rows_upserted']}")
 
 
 if __name__ == "__main__":
