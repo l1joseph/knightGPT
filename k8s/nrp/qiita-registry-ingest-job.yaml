@@ -1,0 +1,55 @@
+# k8s/nrp/qiita-registry-ingest-job.yaml
+#
+# One-time Job: seeds qiita_studies from redbiom's public index. No GPU,
+# no sidecar, no PVC -- lightweight HTTP calls to redbiom's public backend
+# (http://qiita.ucsd.edu:7329) plus a handful of Postgres writes.
+#
+# Re-running: Kubernetes Jobs are immutable, so re-applying this over an
+# already-Complete Job of the same name fails. Delete first:
+#   kubectl delete job knightgpt-qiita-registry-ingest -n knightlab-ml && kubectl apply -f k8s/nrp/qiita-registry-ingest-job.yaml
+# This is idempotent to re-run -- the upsert in scripts/qiita_registry_ingest.py
+# only updates sample_count/contexts/ingested_at, never touching any
+# Stage-2-backfilled metadata columns.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: knightgpt-qiita-registry-ingest
+  namespace: knightlab-ml
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 3600  # 1 hour -- generous ceiling; the confirmed-working recipe
+                                 # processed a 300k-sample context in ~12s, but redbiom's
+                                 # public endpoint can be slow/flaky at times (observed
+                                 # during planning), so this leaves real margin across
+                                 # ~358 contexts. NRP policy requires Jobs to run a command
+                                 # that terminates on its own -- this is the hard backstop.
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: qiita-registry-ingest
+          image: ghcr.io/l1joseph/knightgpt-qiita-registry:latest
+          imagePullPolicy: Always
+          command: ["python", "scripts/qiita_registry_ingest.py", "--log-level", "INFO"]
+          env:
+            # POSTGRES_PASSWORD must come BEFORE POSTGRES_DSN -- Kubernetes only
+            # expands $(VAR) references to env vars defined earlier in the same
+            # container's env list. Getting this backwards caused a real,
+            # reproducible InvalidPasswordError in the prior ingestion-job
+            # sub-project (see k8s/nrp/ingestion-job.yaml's own comment on this).
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knightgpt-postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DSN
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
+          resources:  # requests == limits (ratio 1.0) to satisfy this namespace's Gatekeeper
+                      # container-must-meet-memory-and-cpu-ratio policy. This is a lightweight
+                      # HTTP+Postgres job with no GPU/large-file work, so modest values suffice.
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi

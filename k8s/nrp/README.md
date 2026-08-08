@@ -19,6 +19,7 @@ Manifests and what they own:
 | `duckdb-verify-pod.yaml` | throwaway debug pod pattern for inspecting the DuckDB PVC |
 | `ingestion-pvc.yaml` | `PersistentVolumeClaim/knightgpt-ingestion-data` (RWO, rook-ceph-block) — raw PDFs/markdown/processed intermediates for the ingestion Job; **never delete**, see warning comment in that file |
 | `ingestion-job.yaml` | `Job/knightgpt-ingestion` — GPU-backed (native `vllm/vllm-openai` sidecar + batch orchestrator main container), built and run successfully in production (see "Re-running this Job" below before re-applying) |
+| `qiita-registry-ingest-job.yaml` | `Job/knightgpt-qiita-registry-ingest` — lightweight, no GPU/sidecar/PVC; see "Qiita registry ingestion Job" below, **including the live-run failure documented there before re-applying** |
 
 Apply order matters where a PVC was split out from its owning workload:
 `kubectl apply -f k8s/nrp/postgres-pvc.yaml -f k8s/nrp/postgres-cluster.yaml`,
@@ -176,6 +177,56 @@ edges, as of this writing) was digest
 `sha256:b19c80cc3ae08140fc61b88330dd3ff6b42c2d064de7b84a3486814f205c6b51` — recorded here
 since nothing else in the repo captures it, and `latest` will have moved past it as soon as
 this branch merges and CI rebuilds.
+
+## Qiita registry ingestion Job
+
+`qiita-registry-ingest-job.yaml` seeds `qiita_studies` (Stage 1 of a two-stage
+plan) from redbiom's public index at `http://qiita.ucsd.edu:7329` — no
+lab-network or credential dependency, unlike the main ingestion Job's Postgres
+access. It enumerates every redbiom context, fetches the samples in each, and
+summarizes them by `qiita_study_id`, upserting `study_id`, `sample_count`, and
+which contexts each study appeared in. It deliberately leaves
+`title`/`abstract`/`principal_investigator`/`funding`/`metadata` `NULL` — those
+are a separate, future Stage 2 backfill via direct Postgres access to Qiita's
+own database, not attempted here. This is a one-time run, not a CronJob.
+
+### Live-run outcome (2026-08-08): Job failed, zero rows written — do not re-apply as-is
+
+The Job was applied and run live against the real image and the real
+`qiita_studies` table. It reached `Failed` (`DeadlineExceeded`) after the full
+`activeDeadlineSeconds: 3600` window, and **`SELECT count(*) FROM
+qiita_studies` afterward was 0** — the run produced no data at all, not a
+partial result.
+
+Root cause, confirmed by direct diagnosis inside the running pod: the
+per-context `redbiom summarize samples --category qiita_study_id --from
+<file>` call (the script's `REDBIOM_TIMEOUT_S = 120` per-call timeout, in
+`scripts/qiita_registry_ingest.py`) did not complete even when manually re-run
+with an extended 580-second timeout, against a context with only ~12,900
+samples. This directly contradicts the "~12s for a 300k-sample context"
+estimate this Job's `activeDeadlineSeconds` comment was sized around — in the
+live run, 16 of the first 19 contexts (357 total) failed via timeout, and only
+contexts with trivially small study counts (1 study) completed at all. At that
+observed rate the full 357-context loop would take on the order of 9-10 hours,
+far past the 1-hour deadline.
+
+Compounding this: `run_registry_ingest()` accumulates all per-context results
+in memory and only calls `_upsert_registry()` once, after the full loop over
+all contexts finishes (see `scripts/qiita_registry_ingest.py`). There is no
+per-context or incremental Postgres write. So when `activeDeadlineSeconds`
+kills the pod partway through the context loop, **no rows are written at
+all**, regardless of how many contexts succeeded before the deadline.
+
+This was not chased further or patched as part of this run — it needs one of:
+a much larger `activeDeadlineSeconds` (untested how large; the observed
+per-call slowness suggests hours, not the original 1-hour estimate), a
+retry/backoff or batching strategy for the `redbiom summarize` call itself, or
+changing the script to checkpoint/upsert incrementally per context so a
+deadline-killed run still keeps whatever it completed. Until one of those
+lands, **re-applying this manifest unmodified is expected to reproduce the
+same zero-rows outcome**, not partial progress. See
+`.superpowers/sdd/2026-08-07-qiita-registry-ingestion/task-5-report.md` for
+the full command-by-command record of the live run.
 
 ## Known gap: NRP corpus is not a strict superset of the old Cosmos corpus
 
