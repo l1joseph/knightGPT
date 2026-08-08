@@ -4,44 +4,42 @@ import pytest
 
 
 @pytest.mark.unit
-def test_parse_study_counts_multiple_studies():
-    from scripts.qiita_registry_ingest import parse_study_counts
+def test_parse_study_counts_from_sample_ids_multiple_studies():
+    from scripts.qiita_registry_ingest import parse_study_counts_from_sample_ids
 
-    output = "10317\t31556\n12949\t17277\n\nTotal samples\t48833\n"
-    result = parse_study_counts(output)
+    fetch_output = "10317.sample1\n10317.sample2\n12949.sample1\n"
+    result = parse_study_counts_from_sample_ids(fetch_output)
 
-    assert result == {10317: 31556, 12949: 17277}
-
-
-@pytest.mark.unit
-def test_parse_study_counts_single_study():
-    from scripts.qiita_registry_ingest import parse_study_counts
-
-    output = "10333\t1\n\nTotal samples\t1\n"
-    result = parse_study_counts(output)
-
-    assert result == {10333: 1}
+    assert result == {10317: 2, 12949: 1}
 
 
 @pytest.mark.unit
-def test_parse_study_counts_empty_context():
-    from scripts.qiita_registry_ingest import parse_study_counts
+def test_parse_study_counts_from_sample_ids_empty_input():
+    from scripts.qiita_registry_ingest import parse_study_counts_from_sample_ids
 
-    assert parse_study_counts("") == {}
+    assert parse_study_counts_from_sample_ids("") == {}
 
 
 @pytest.mark.unit
-def test_parse_study_counts_ignores_total_line_only():
-    from scripts.qiita_registry_ingest import parse_study_counts
+def test_parse_study_counts_from_sample_ids_skips_malformed_prefix():
+    from scripts.qiita_registry_ingest import parse_study_counts_from_sample_ids
 
-    # "Total samples" itself is never a valid numeric study_id, so a
-    # naive int() cast would raise -- confirms the line is skipped, not
-    # silently mis-parsed as a study.
-    output = "10317\t5\n\nTotal samples\t5\n"
-    result = parse_study_counts(output)
+    fetch_output = "10317.sample1\nnot_a_number.weird\n10317.sample2\n"
+    result = parse_study_counts_from_sample_ids(fetch_output)
 
-    assert "Total samples" not in result
-    assert result == {10317: 5}
+    assert result == {10317: 2}
+
+
+@pytest.mark.unit
+def test_parse_study_counts_from_sample_ids_sample_name_with_dots():
+    from scripts.qiita_registry_ingest import parse_study_counts_from_sample_ids
+
+    # sample names can contain further dots (e.g. diabimmune.sample.id.X) --
+    # split(".", 1) must take only the FIRST dot as the boundary.
+    fetch_output = "11884.diabimmune.sample.id.3105832\n"
+    result = parse_study_counts_from_sample_ids(fetch_output)
+
+    assert result == {11884: 1}
 
 
 @pytest.mark.unit

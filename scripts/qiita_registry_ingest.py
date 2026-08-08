@@ -17,7 +17,6 @@ import concurrent.futures
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -30,21 +29,37 @@ REDBIOM_TIMEOUT_S = 300
 MAX_WORKERS = 5
 
 
-def parse_study_counts(summarize_output: str) -> dict[int, int]:
-    """Parse `redbiom summarize samples --category qiita_study_id`'s TSV
-    stdout into {study_id: sample_count}.
+def parse_study_counts_from_sample_ids(fetch_output: str) -> dict[int, int]:
+    """Count samples per study by parsing the study ID from each sample
+    ID's prefix (format: <study_id>.<sample_name> -- verified against
+    redbiom's own qiita_study_id metadata to match exactly for sampled
+    cases). A sample ID with a non-numeric prefix is skipped and logged,
+    not raised, matching this script's per-item-tolerant philosophy.
 
-    The real output is one "<study_id>\\t<count>" row per study, then a
-    blank line, then a trailing "Total samples\\t<N>" summary row -- both
-    the blank line and the summary row are skipped, not treated as data.
+    KNOWN SIMPLIFICATION: this trusts the sample-ID prefix instead of
+    redbiom's official qiita_study_id metadata field (which would require
+    a much slower `redbiom summarize samples --category qiita_study_id`
+    call -- confirmed via source inspection to make ~1 HTTP round-trip per
+    200 samples server-side, the actual bottleneck this replaces).
+    redbiom's `fetch samples-contained --unambiguous` flag hints some
+    samples can be "ambiguous" in edge cases, so there is a small
+    theoretical risk the ID prefix could diverge from the true metadata
+    value for some samples. Accepted for Stage 1, which is explicitly a
+    rough registry -- Stage 2 (direct Postgres access to Qiita's own
+    database, not yet available) will do authoritative backfill later.
     """
-    counts = {}
-    for line in summarize_output.splitlines():
+    counts: dict[int, int] = {}
+    for line in fetch_output.splitlines():
         line = line.strip()
-        if not line or line.startswith("Total samples"):
+        if not line:
             continue
-        study_id_str, count_str = line.split("\t")
-        counts[int(study_id_str)] = int(count_str)
+        study_id_str = line.split(".", 1)[0]
+        try:
+            study_id = int(study_id_str)
+        except ValueError:
+            logger.warning(f"Skipping sample with unparseable study ID prefix: {line!r}")
+            continue
+        counts[study_id] = counts.get(study_id, 0) + 1
     return counts
 
 
@@ -83,35 +98,21 @@ def list_contexts() -> list[str]:
 
 
 def fetch_and_summarize_context(context_name: str) -> dict[int, int]:
-    """Fetch every sample ID in a context and summarize by qiita_study_id.
-
-    Runs `redbiom fetch samples-contained --context <ctx>` to a temp file,
-    then `redbiom summarize samples --category qiita_study_id --from
-    <file>` on that file (summarize requires a real file path via --from,
-    not stdin).
+    """Fetch every sample ID in a context and count samples per study by
+    parsing the study ID directly from each sample ID's prefix, instead
+    of the much slower `redbiom summarize samples --category
+    qiita_study_id` call (confirmed via direct source inspection to make
+    ~1 HTTP round-trip per 200 samples server-side -- the actual
+    bottleneck, not something a Python API vs CLI choice affects).
     """
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt") as tmp:
-        fetch_result = subprocess.run(
-            ["redbiom", "fetch", "samples-contained", "--context", context_name],
-            capture_output=True,
-            text=True,
-            timeout=REDBIOM_TIMEOUT_S,
-            check=True,
-        )
-        tmp.write(fetch_result.stdout)
-        tmp.flush()
-
-        if not fetch_result.stdout.strip():
-            return {}
-
-        summarize_result = subprocess.run(
-            ["redbiom", "summarize", "samples", "--category", "qiita_study_id", "--from", tmp.name],
-            capture_output=True,
-            text=True,
-            timeout=REDBIOM_TIMEOUT_S,
-            check=True,
-        )
-        return parse_study_counts(summarize_result.stdout)
+    fetch_result = subprocess.run(
+        ["redbiom", "fetch", "samples-contained", "--context", context_name],
+        capture_output=True,
+        text=True,
+        timeout=REDBIOM_TIMEOUT_S,
+        check=True,
+    )
+    return parse_study_counts_from_sample_ids(fetch_result.stdout)
 
 
 async def _upsert_registry(pool, registry: dict[int, dict]) -> int:
