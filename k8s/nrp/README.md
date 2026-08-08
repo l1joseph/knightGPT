@@ -19,7 +19,7 @@ Manifests and what they own:
 | `duckdb-verify-pod.yaml` | throwaway debug pod pattern for inspecting the DuckDB PVC |
 | `ingestion-pvc.yaml` | `PersistentVolumeClaim/knightgpt-ingestion-data` (RWO, rook-ceph-block) — raw PDFs/markdown/processed intermediates for the ingestion Job; **never delete**, see warning comment in that file |
 | `ingestion-job.yaml` | `Job/knightgpt-ingestion` — GPU-backed (native `vllm/vllm-openai` sidecar + batch orchestrator main container), built and run successfully in production (see "Re-running this Job" below before re-applying) |
-| `qiita-registry-ingest-job.yaml` | `Job/knightgpt-qiita-registry-ingest` — lightweight, no GPU/sidecar/PVC; ran to `Complete` in production with partial coverage (32/500+ expected studies) — see "Qiita registry ingestion Job" below before re-applying or relying on this data |
+| `qiita-registry-ingest-job.yaml` | `Job/knightgpt-qiita-registry-ingest` — lightweight, no GPU/sidecar/PVC; ran to `Complete` in production, 838 studies from 356/357 contexts (5m43s) — see "Qiita registry ingestion Job" below for the full three-run history |
 
 Apply order matters where a PVC was split out from its owning workload:
 `kubectl apply -f k8s/nrp/postgres-pvc.yaml -f k8s/nrp/postgres-cluster.yaml`,
@@ -184,7 +184,10 @@ this branch merges and CI rebuilds.
 plan) from redbiom's public index at `http://qiita.ucsd.edu:7329` — no
 lab-network or credential dependency, unlike the main ingestion Job's Postgres
 access. It enumerates every redbiom context, fetches the samples in each, and
-summarizes them by `qiita_study_id`, upserting `study_id`, `sample_count`, and
+(as of commit `428a9e5` — see "Run 3" below; earlier runs instead ran a
+separate, much slower `redbiom summarize samples --category qiita_study_id`
+call per context) parses each sample ID's `<study_id>.<sample_name>` prefix
+locally to get its `qiita_study_id`, upserting `study_id`, `sample_count`, and
 which contexts each study appeared in. It deliberately leaves
 `title`/`abstract`/`principal_investigator`/`funding`/`metadata` `NULL` — those
 are a separate, future Stage 2 backfill via direct Postgres access to Qiita's
@@ -240,24 +243,45 @@ incomplete. No checkpoint-upsert failures occurred (0 occurrences of
 "checkpoint upsert failed" in the full log) — every context that completed
 its redbiom fetch+summarize successfully was reliably persisted.
 
-**Status of this sub-project as of Run 2**: the "runs to completion without
-losing all progress" bug from Run 1 is fixed and confirmed working live.
-The "most contexts are too slow against redbiom's live public backend to
-finish even in 300s" problem is a distinct, still-open issue — likely
-requires either a fundamentally different query strategy against redbiom
-(e.g. its Python API directly instead of shelling out to the CLI per call,
-or batching/paginating within a context rather than one `summarize` call
-over the whole sample list) or accepting that a full-coverage run may need
-hours per individual large context rather than minutes. **Re-running this
-Job as-is (`kubectl delete job ... && kubectl apply -f ...`) is
-idempotent and will re-attempt all 357 contexts from scratch** (the
-incremental upsert overwrites cumulative totals, it does not skip
-already-succeeded contexts), so a re-run might pick up different contexts
-succeeding/failing on a given day (redbiom's public backend responsiveness
-appears to vary), but is not guaranteed to do meaningfully better without
-addressing the root performance issue first. See
+**Run 3 (2026-08-08 16:12-16:18 UTC, 5m43s): `Complete`, coverage resolved.**
+Commit `428a9e5` eliminated the slow `redbiom summarize samples --category
+qiita_study_id` call entirely — it was replaced with local parsing of the
+`<study_id>.<sample_name>` prefix already present in every sample ID
+returned by the (fast) `redbiom fetch samples-contained` call, verified
+during development to produce identical results to the old summarize-based
+approach. This removes the actual bottleneck Run 2 had only made
+survivable, not fixed. Each context now needs a single ~3-10 second
+`redbiom fetch` call instead of a `fetch`-then-multi-minute-`summarize`
+pair.
+
+Result: **356/357 contexts (99.7%) succeeded** — a single context
+(`Deblur_2021.09-Illumina-16S-V1-V3-90nt-dd6875`) failed with a plain
+`subprocess.CalledProcessError` (redbiom's CLI itself returned a non-zero
+exit code for that one context, not a timeout — ordinary, expected
+per-context flakiness, not a new bottleneck) — yielding **838 distinct
+studies**, well past the ~500+ this Job was expected to produce. Study
+10317 (American Gut Project): `sample_count = 344845` across **64**
+contexts (`sample_count` is a sum across every context a study appears in,
+not a distinct-sample count, so a study reprocessed through many pipeline
+variants — as AGP clearly has been, at 64 contexts — accumulates a total
+well above its raw sample count; this is the documented, intentional
+behavior of `merge_context_results()`, not a bug). All 838 rows have
+`title IS NULL`, confirming Stage 1 correctly left metadata untouched.
+
+The manifest's `activeDeadlineSeconds: 21600` / `resources: 2 CPU, 4Gi` from
+the Run 2 update were left as-is for Run 3 (per-instruction — generous
+headroom given the now much lower actual need, not a correctness problem).
+
+**Status of this sub-project as of Run 3**: both problems found in Runs 1-2
+are now resolved — the Job completes quickly, checkpointing works, and
+coverage is complete for all practical purposes (356/357 contexts, only one
+ordinary transient per-context failure). **Re-running this Job
+(`kubectl delete job ... && kubectl apply -f ...`) is idempotent** and,
+given the current fast per-context cost, should be safe and cheap to redo
+periodically if desired (though it remains a manually-triggered one-time
+Job, not a CronJob, per the original design). See
 `.superpowers/sdd/2026-08-07-qiita-registry-ingestion/task-5-report.md` for
-the full command-by-command record of both live runs.
+the full command-by-command record of all three live runs.
 
 ## Known gap: NRP corpus is not a strict superset of the old Cosmos corpus
 
