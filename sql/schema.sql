@@ -22,6 +22,19 @@ CREATE TABLE IF NOT EXISTS chunk_edges (
     PRIMARY KEY (src_chunk_id, dst_chunk_id)
 );
 
+CREATE TABLE IF NOT EXISTS qiita_studies (
+    study_id                bigint PRIMARY KEY,
+    sample_count            integer NOT NULL,
+    contexts                jsonb NOT NULL DEFAULT '[]'::jsonb,
+    title                   text,
+    abstract                text,
+    principal_investigator  text,
+    funding                 text,
+    metadata                jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ingested_at             timestamptz NOT NULL DEFAULT now(),
+    metadata_backfilled_at  timestamptz
+);
+
 -- pgGraph registration: chunks as nodes, chunk_edges as an edge-table relationship.
 -- Idempotency is not assumed from pgGraph itself; each registration is wrapped
 -- in its own DO block so re-running this file against an already-provisioned
