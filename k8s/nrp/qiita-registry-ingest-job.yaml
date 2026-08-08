@@ -17,12 +17,21 @@ metadata:
   namespace: knightlab-ml
 spec:
   backoffLimit: 2
-  activeDeadlineSeconds: 3600  # 1 hour -- generous ceiling; the confirmed-working recipe
-                                 # processed a 300k-sample context in ~12s, but redbiom's
-                                 # public endpoint can be slow/flaky at times (observed
-                                 # during planning), so this leaves real margin across
-                                 # ~358 contexts. NRP policy requires Jobs to run a command
-                                 # that terminates on its own -- this is the hard backstop.
+  activeDeadlineSeconds: 21600  # 6 hours -- revised up from an original 1-hour estimate
+                                  # after a live run showed that was badly wrong: the
+                                  # ~12s-for-a-300k-sample-context figure that estimate was
+                                  # based on did not hold against redbiom's live public
+                                  # endpoint, where individual `redbiom summarize samples`
+                                  # calls were observed taking multiple minutes, not
+                                  # seconds. Real total wall-clock time across ~358 contexts
+                                  # is genuinely uncertain, so this is a generous ceiling
+                                  # rather than a confident estimate. The orchestrator now
+                                  # checkpoints to Postgres incrementally after every
+                                  # context (see scripts/qiita_registry_ingest.py), so even
+                                  # a run that hits this deadline keeps whatever progress it
+                                  # made rather than losing it all. NRP policy requires Jobs
+                                  # to run a command that terminates on its own -- this is
+                                  # the hard backstop.
   template:
     spec:
       restartPolicy: Never
@@ -45,11 +54,14 @@ spec:
             - name: POSTGRES_DSN
               value: "postgresql://postgres:$(POSTGRES_PASSWORD)@knightgpt-postgres.knightlab-ml.svc.cluster.local:5432/knightgpt"
           resources:  # requests == limits (ratio 1.0) to satisfy this namespace's Gatekeeper
-                      # container-must-meet-memory-and-cpu-ratio policy. This is a lightweight
-                      # HTTP+Postgres job with no GPU/large-file work, so modest values suffice.
+                      # container-must-meet-memory-and-cpu-ratio policy. Bumped from the
+                      # original 1 CPU / 2Gi -- the orchestrator now runs MAX_WORKERS=5
+                      # concurrent redbiom subprocess workers (see
+                      # scripts/qiita_registry_ingest.py) instead of one at a time, needing
+                      # more headroom than the original single-threaded design assumed.
             requests:
-              cpu: "1"
-              memory: 2Gi
+              cpu: "2"
+              memory: 4Gi
             limits:
-              cpu: "1"
-              memory: 2Gi
+              cpu: "2"
+              memory: 4Gi

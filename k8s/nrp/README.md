@@ -19,7 +19,7 @@ Manifests and what they own:
 | `duckdb-verify-pod.yaml` | throwaway debug pod pattern for inspecting the DuckDB PVC |
 | `ingestion-pvc.yaml` | `PersistentVolumeClaim/knightgpt-ingestion-data` (RWO, rook-ceph-block) — raw PDFs/markdown/processed intermediates for the ingestion Job; **never delete**, see warning comment in that file |
 | `ingestion-job.yaml` | `Job/knightgpt-ingestion` — GPU-backed (native `vllm/vllm-openai` sidecar + batch orchestrator main container), built and run successfully in production (see "Re-running this Job" below before re-applying) |
-| `qiita-registry-ingest-job.yaml` | `Job/knightgpt-qiita-registry-ingest` — lightweight, no GPU/sidecar/PVC; see "Qiita registry ingestion Job" below, **including the live-run failure documented there before re-applying** |
+| `qiita-registry-ingest-job.yaml` | `Job/knightgpt-qiita-registry-ingest` — lightweight, no GPU/sidecar/PVC; ran to `Complete` in production with partial coverage (32/500+ expected studies) — see "Qiita registry ingestion Job" below before re-applying or relying on this data |
 
 Apply order matters where a PVC was split out from its owning workload:
 `kubectl apply -f k8s/nrp/postgres-pvc.yaml -f k8s/nrp/postgres-cluster.yaml`,
@@ -190,43 +190,74 @@ which contexts each study appeared in. It deliberately leaves
 are a separate, future Stage 2 backfill via direct Postgres access to Qiita's
 own database, not attempted here. This is a one-time run, not a CronJob.
 
-### Live-run outcome (2026-08-08): Job failed, zero rows written — do not re-apply as-is
+### Live-run history — two runs, read both before touching this Job again
 
-The Job was applied and run live against the real image and the real
-`qiita_studies` table. It reached `Failed` (`DeadlineExceeded`) after the full
-`activeDeadlineSeconds: 3600` window, and **`SELECT count(*) FROM
-qiita_studies` afterward was 0** — the run produced no data at all, not a
-partial result.
+**Run 1 (2026-08-08 03:59-05:02 UTC): failed, zero rows.** The original
+single-threaded orchestrator (`REDBIOM_TIMEOUT_S = 120`, no concurrency, a
+single whole-run Postgres upsert only after all 357 contexts finished) hit
+`activeDeadlineSeconds: 3600` (1 hour) with `qiita_studies` still empty.
+Root cause, confirmed by live diagnosis inside the pod: the per-context
+`redbiom summarize samples --category qiita_study_id --from <file>` call
+did not complete even with a manually-extended 580-second timeout against a
+~12,900-sample context — directly contradicting the "~12s for a 300k-sample
+context" estimate the original 1-hour deadline was sized around. Because the
+orchestrator only wrote to Postgres once, at the very end, the
+deadline-killed run lost 100% of its progress.
 
-Root cause, confirmed by direct diagnosis inside the running pod: the
-per-context `redbiom summarize samples --category qiita_study_id --from
-<file>` call (the script's `REDBIOM_TIMEOUT_S = 120` per-call timeout, in
-`scripts/qiita_registry_ingest.py`) did not complete even when manually re-run
-with an extended 580-second timeout, against a context with only ~12,900
-samples. This directly contradicts the "~12s for a 300k-sample context"
-estimate this Job's `activeDeadlineSeconds` comment was sized around — in the
-live run, 16 of the first 19 contexts (357 total) failed via timeout, and only
-contexts with trivially small study counts (1 study) completed at all. At that
-observed rate the full 357-context loop would take on the order of 9-10 hours,
-far past the 1-hour deadline.
+**Fix applied**: `scripts/qiita_registry_ingest.py` was redesigned (commits
+`f5d0943`, `8c63a9a`) to process contexts concurrently (`MAX_WORKERS = 5`
+thread pool), checkpoint to Postgres incrementally after every context
+(cumulative recompute-and-upsert, not additive — safe and idempotent even on
+re-run), reuse a single connection pool across the whole run, and tolerate
+individual checkpoint-write failures without aborting. `REDBIOM_TIMEOUT_S`
+was also raised 120s → 300s. The image was rebuilt from this code and this
+manifest's `activeDeadlineSeconds` raised 3600 → 21600 (6 hours) and
+`resources` bumped 1 CPU/2Gi → 2 CPU/4Gi for the 5-worker concurrency.
 
-Compounding this: `run_registry_ingest()` accumulates all per-context results
-in memory and only calls `_upsert_registry()` once, after the full loop over
-all contexts finishes (see `scripts/qiita_registry_ingest.py`). There is no
-per-context or incremental Postgres write. So when `activeDeadlineSeconds`
-kills the pod partway through the context loop, **no rows are written at
-all**, regardless of how many contexts succeeded before the deadline.
+**Run 2 (2026-08-08 05:46-10:29 UTC, 4h43m): reached `Complete`, but with
+substantial, not full, coverage.** The incremental-checkpointing fix worked
+as designed — Postgres rows grew steadily over the run's ~4.7 hours, visible
+live via `SELECT count(*) FROM qiita_studies`, and the Job finished cleanly
+within the 6-hour deadline this time. But the *underlying* redbiom
+`summarize samples` slowness that caused Run 1's failure was not actually
+resolved by raising the per-call timeout to 300s — it was only made
+survivable. Final result: **80/357 contexts (22%) succeeded, 277/357 (78%)
+still failed via the same `subprocess.TimeoutExpired` at 300s** (every one
+of the 277 failures was a plain timeout, confirmed by grepping the full pod
+log — no other exception type appeared), yielding **32 distinct studies**
+in `qiita_studies` — far short of the ~500+ this Job was expected to
+produce (one single context alone was expected to contribute 573 distinct
+studies on its own; that context, along with most others, is presumably
+among the 277 that timed out here). Study 10317 (American Gut Project) is
+present but severely undercounted as a direct consequence: `sample_count =
+32` across only 5 contexts, versus the tens-of-thousands and many-contexts
+expected if the large contexts it actually belongs to hadn't mostly timed
+out.
 
-This was not chased further or patched as part of this run — it needs one of:
-a much larger `activeDeadlineSeconds` (untested how large; the observed
-per-call slowness suggests hours, not the original 1-hour estimate), a
-retry/backoff or batching strategy for the `redbiom summarize` call itself, or
-changing the script to checkpoint/upsert incrementally per context so a
-deadline-killed run still keeps whatever it completed. Until one of those
-lands, **re-applying this manifest unmodified is expected to reproduce the
-same zero-rows outcome**, not partial progress. See
+All 32 persisted rows are correctly Stage-1-only (`title IS NULL` for all
+of them, confirmed by query), so what's there is *correct*, just
+incomplete. No checkpoint-upsert failures occurred (0 occurrences of
+"checkpoint upsert failed" in the full log) — every context that completed
+its redbiom fetch+summarize successfully was reliably persisted.
+
+**Status of this sub-project as of Run 2**: the "runs to completion without
+losing all progress" bug from Run 1 is fixed and confirmed working live.
+The "most contexts are too slow against redbiom's live public backend to
+finish even in 300s" problem is a distinct, still-open issue — likely
+requires either a fundamentally different query strategy against redbiom
+(e.g. its Python API directly instead of shelling out to the CLI per call,
+or batching/paginating within a context rather than one `summarize` call
+over the whole sample list) or accepting that a full-coverage run may need
+hours per individual large context rather than minutes. **Re-running this
+Job as-is (`kubectl delete job ... && kubectl apply -f ...`) is
+idempotent and will re-attempt all 357 contexts from scratch** (the
+incremental upsert overwrites cumulative totals, it does not skip
+already-succeeded contexts), so a re-run might pick up different contexts
+succeeding/failing on a given day (redbiom's public backend responsiveness
+appears to vary), but is not guaranteed to do meaningfully better without
+addressing the root performance issue first. See
 `.superpowers/sdd/2026-08-07-qiita-registry-ingestion/task-5-report.md` for
-the full command-by-command record of the live run.
+the full command-by-command record of both live runs.
 
 ## Known gap: NRP corpus is not a strict superset of the old Cosmos corpus
 
