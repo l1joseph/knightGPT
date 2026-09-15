@@ -306,3 +306,73 @@ NRP storage. If full parity with the old Cosmos corpus matters for a future use 
 the MCP server), these 6 would need to be sourced separately (e.g. copied from Cosmos
 scratch and ingested directly) rather than assumed already covered. This is a known,
 accepted gap as of the current run, not an open bug to chase.
+
+## Embedding dimension discovery (kl-remote deploy)
+
+`docker/docker-compose.yaml`'s `api` service requires `VLLM_EMBEDDING_DIM` with **no
+default** — `${VLLM_EMBEDDING_DIM:?VLLM_EMBEDDING_DIM must be set explicitly ...}` — so a
+missing value fails the container at startup instead of silently ingesting with the wrong
+vector width. Don't assume this value; discover it with a live call against NRP's endpoint,
+since it's the actual output size of whatever model `qwen3-embedding` currently resolves to,
+not a documented constant:
+
+```bash
+~/miniforge3/envs/knightGPT/bin/python -c "
+from openai import OpenAI
+import os
+client = OpenAI(api_key=os.environ['VLLM_API_KEY'], base_url='https://ellm.nrp-nautilus.io/v1')
+resp = client.embeddings.create(model='qwen3-embedding', input='test')
+print('DIMENSION:', len(resp.data[0].embedding))
+"
+```
+
+Confirmed on 2026-09-14 from Cosmos (`VLLM_API_KEY` sourced from this worktree's `.env`):
+**`DIMENSION: 4096`**. Set `VLLM_EMBEDDING_DIM=4096` in kl-remote's `.env` (see
+`.env.example`) before the first `docker compose up`. If `qwen3-embedding` is ever
+repointed at a different underlying model, re-run this exact call and update both
+`.env.example`'s comment and kl-remote's `.env` — don't carry the old value forward.
+
+## Re-ingestion after a kl-remote Postgres restore (one-time deploy step)
+
+This step is **not executable from Cosmos** — it requires a real, reachable Postgres, which
+only exists once the `docker/docker-compose.yaml` stack (Task 7) is actually running on
+kl-remote. It is written up here as an exact runbook for whoever performs that deploy, not
+run as part of this task.
+
+After `docker compose up -d postgres` completes its first boot (restore from the Qiita S3
+backup + `TRUNCATE papers, chunks, chunk_edges`, per Task 7's init script) and **before**
+starting the `api`/`open-webui` containers:
+
+1. Confirm `VLLM_EMBEDDING_DIM` is set correctly in kl-remote's `.env` per the discovery
+   step above — do not skip this even if it "worked before"; re-verify against a live call
+   if there's any doubt the endpoint's model has changed.
+2. Run the same 3-paper local ingestion logic already proven during the 2026-08-28 demo,
+   scoped to `data/paper_lists/initial_papers.txt` only, pointed at kl-remote's Postgres
+   (reachable directly at `postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt`
+   since this Postgres runs locally on kl-remote — no port-forward needed, unlike the NRP
+   in-cluster DSN documented above) and the NRP embedding endpoint:
+
+   ```bash
+   POSTGRES_DSN="postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt" \
+   VLLM_EMBEDDING_URL="https://ellm.nrp-nautilus.io/v1" \
+   VLLM_API_KEY="$NRP_LLM_API_KEY" \
+   VLLM_EMBEDDING_MODEL="qwen3-embedding" \
+   ~/miniforge3/envs/knightGPT/bin/python -c "
+   from scripts.nrp_batch_ingest import run_batch_ingestion
+   from pathlib import Path
+   run_batch_ingestion(paper_lists=[Path('data/paper_lists/initial_papers.txt')], max_papers=3)
+   "
+   ```
+
+3. Verify afterward (live-verification, matching the design spec's Testing section
+   convention of live-verifying real infra rather than unit-testing it):
+   - `SELECT count(*) FROM papers;` → `3`
+   - `SELECT count(*) FROM chunks;` → `> 0`
+   - `SELECT count(*) FROM chunk_edges;` → `> 0`
+   - Spot-check one row, e.g. `SELECT content FROM chunks LIMIT 1;`, and confirm it has
+     real, non-null, non-empty text — not just a non-zero row count.
+
+Only once all four checks pass should `api`/`open-webui` be started
+(`docker compose up -d api open-webui`) — starting them against an empty or
+partially-ingested corpus would make the RAG pipeline silently return nothing useful rather
+than fail loudly.
