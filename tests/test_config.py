@@ -38,7 +38,7 @@ def test_vllm_settings_api_key_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("VLLM_API_KEY", raising=False)
     from src.utils.config import VLLMSettings
 
-    settings = VLLMSettings()
+    settings = VLLMSettings(_env_file=None)
     assert settings.api_key == "EMPTY"
 
 
@@ -58,7 +58,7 @@ def test_vllm_settings_embedding_dim_defaults_to_3584(monkeypatch):
     monkeypatch.delenv("VLLM_EMBEDDING_DIM", raising=False)
     from src.utils.config import VLLMSettings
 
-    settings = VLLMSettings()
+    settings = VLLMSettings(_env_file=None)
     assert settings.embedding_dim == 3584
 
 
