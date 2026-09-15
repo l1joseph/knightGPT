@@ -265,6 +265,34 @@ echo "=== [pg] create db + extension + restore + truncate + re-register pgGraph 
 # for the real deployment): re-apply sql/schema.sql (its DO $$ blocks
 # upsert-by-name, re-pointing the stored OIDs) then rebuild the graph
 # projection.
+# Real verification per k8s/nrp/RESTORE.md step 4 -- registered_tables()/
+# registered_edges() look fine even with stale OIDs; only a real
+# graph.expand() call proves the registration actually works. chunks is
+# intentionally empty at this point (truncated below), and pgGraph does
+# NOT treat a nonexistent starting id as "zero rows" -- confirmed
+# directly: it raises a hard error ("Node not found", diagnostic PG010)
+# for any id that isn't an actual row, a different (and here,
+# false-positive) failure mode from the OID-staleness bug this check
+# exists to catch (confirmed in job 101318's log). RESTORE.md's own
+# tested procedure hit this identical empty-table situation and solved
+# it the same way this does: insert throwaway probe rows to have
+# something real to resolve against, then clean them up. Written to a
+# file (not inlined through runpg's already-multi-layer quoting) to
+# avoid a repeat of the earlier fragile-nested-quoting problem.
+# Wrapped in BEGIN/ROLLBACK (not explicit DELETEs) so the probe row is
+# never actually persisted either way: with -v ON_ERROR_STOP=1, a
+# failing graph.expand() stops the script before the ROLLBACK line runs,
+# but since the transaction was never committed, Postgres rolls it back
+# automatically when this psql session's connection closes -- cleanup
+# happens on every path, not just the happy one.
+cat > "$BUILD_ROOT/pgdata/verify-graph-expand.sql" <<'SQL'
+BEGIN;
+INSERT INTO papers (doi, title) VALUES ('schema-verify-probe-doi', 'schema verify probe');
+INSERT INTO chunks (id, paper_doi, text) VALUES ('schema-verify-probe-chunk', 'schema-verify-probe-doi', 'probe');
+SELECT * FROM graph.expand('public.chunks'::regclass, 'schema-verify-probe-chunk', 1);
+ROLLBACK;
+SQL
+
 runpg '
 set -e
 PGBIN=/work/pg17/bin
@@ -272,8 +300,13 @@ PGBIN=/work/pg17/bin
 "$PGBIN/psql" -h localhost -p 5432 -U postgres -d knightgpt -c "CREATE EXTENSION IF NOT EXISTS graph;"
 "$PGBIN/pg_restore" -h localhost -p 5432 -U postgres -d knightgpt --no-owner --if-exists --clean /dump/backup.dump
 "$PGBIN/psql" -h localhost -p 5432 -U postgres -d knightgpt -c "TRUNCATE papers, chunks, chunk_edges CASCADE;"
-"$PGBIN/psql" -h localhost -p 5432 -U postgres -d knightgpt -f /dump/schema.sql
-"$PGBIN/psql" -h localhost -p 5432 -U postgres -d knightgpt -c "SELECT graph.build();"
+# -v ON_ERROR_STOP=1 required: without it psql does not exit non-zero on
+# an in-script error, so `set -e` above would not catch a broken
+# registration (mirrors the same fix in
+# docker/postgres/init/02-restore-backup.sh for the real deployment).
+"$PGBIN/psql" -v ON_ERROR_STOP=1 -h localhost -p 5432 -U postgres -d knightgpt -f /dump/schema.sql
+"$PGBIN/psql" -v ON_ERROR_STOP=1 -h localhost -p 5432 -U postgres -d knightgpt -c "SELECT graph.build();"
+"$PGBIN/psql" -v ON_ERROR_STOP=1 -h localhost -p 5432 -U postgres -d knightgpt -f /pgdata/verify-graph-expand.sql
 ' 2>&1 | tee "$BUILD_ROOT/logs/pg-init-sequence.log"
 RESTORE_RC=${PIPESTATUS[0]}
 [ "$RESTORE_RC" = "0" ] || fail "postgres create/extension/restore/truncate sequence failed (see pg-init-sequence.log above)"

@@ -58,6 +58,13 @@ dependencies:
       - google-auth-httplib2>=0.2.0
       - google-auth-oauthlib>=1.2.0
 
+      # Zotero integration (src/tools/zotero.py imports pyzotero -- was
+      # missing from both this file and requirements.txt; an ad hoc
+      # `pyzotero` install already sitting in the live knightGPT conda env
+      # (outside this file) is exactly why that gap went unnoticed. See
+      # requirements.txt for the real ModuleNotFoundError this caused.)
+      - pyzotero>=1.5.0
+
       # Logging
       - loguru>=0.7.2
       - rich>=13.7.0

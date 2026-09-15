@@ -27,7 +27,46 @@ psql -U postgres -d knightgpt -c "TRUNCATE papers, chunks, chunk_edges CASCADE;"
 # tables' actual current OIDs; graph.build() then rebuilds the graph
 # projection against the corrected registration (a projection built
 # against the old OIDs would be stale too).
-psql -U postgres -d knightgpt -f /opt/knightgpt/schema.sql
-psql -U postgres -d knightgpt -c "SELECT graph.build();"
+# -v ON_ERROR_STOP=1 is required here: without it, an error inside this
+# script (e.g. a broken registration block) does not make psql exit
+# non-zero, so `set -euo pipefail` above would silently let a real
+# failure through.
+psql -v ON_ERROR_STOP=1 -U postgres -d knightgpt -f /opt/knightgpt/schema.sql
+psql -v ON_ERROR_STOP=1 -U postgres -d knightgpt -c "SELECT graph.build();"
 
-echo "Postgres restore complete: qiita_studies/qiita_study_publications/paper_study_links restored, papers/chunks/chunk_edges truncated for re-ingestion, pgGraph registration re-pointed at post-restore OIDs."
+# Real verification, not just "the script didn't error": per
+# k8s/nrp/RESTORE.md step 4, graph.registered_tables()/
+# graph.registered_edges() are name-based views that look completely
+# normal even when the underlying OIDs are stale -- only an actual
+# graph.expand() call surfaces a broken registration. sql/schema.sql's
+# own DO $$ ... EXCEPTION WHEN OTHERS THEN RAISE NOTICE ... $$; blocks
+# deliberately swallow every registration error (the real verification
+# was always meant to live in scripts/apply_schema.py, which this
+# init-script restore path doesn't use), so without an explicit check
+# here a genuine registration failure would be completely silent.
+#
+# chunks is intentionally empty at this point (truncated above), and
+# pgGraph does NOT treat a nonexistent starting id as "zero rows" the way
+# RESTORE.md's wording first suggested -- confirmed directly: it raises a
+# hard error ("Node not found: <oid>.schema-verify-probe", diagnostic
+# PG010) for any id that isn't an actual row, which is a completely
+# different (and here, false-positive) failure mode from the OID-staleness
+# bug this check exists to catch. RESTORE.md's own tested procedure hit
+# this identical empty-table situation and solved it the same way this
+# does: insert a throwaway probe row to have something real to resolve
+# against. Wrapped in BEGIN/ROLLBACK rather than explicit DELETEs so the
+# probe row is never actually persisted either way: with
+# -v ON_ERROR_STOP=1, a failing graph.expand() stops the script before
+# the ROLLBACK line runs, but the transaction was never committed, so
+# Postgres rolls it back automatically when this psql session's
+# connection closes -- cleanup happens on every path, not just the
+# happy one.
+psql -v ON_ERROR_STOP=1 -U postgres -d knightgpt -c "
+  BEGIN;
+  INSERT INTO papers (doi, title) VALUES ('schema-verify-probe-doi', 'schema verify probe');
+  INSERT INTO chunks (id, paper_doi, text) VALUES ('schema-verify-probe-chunk', 'schema-verify-probe-doi', 'probe');
+  SELECT * FROM graph.expand('public.chunks'::regclass, 'schema-verify-probe-chunk', 1);
+  ROLLBACK;
+"
+
+echo "Postgres restore complete: qiita_studies/qiita_study_publications/paper_study_links restored, papers/chunks/chunk_edges truncated for re-ingestion, pgGraph registration re-pointed at post-restore OIDs and verified via a real graph.expand() call."

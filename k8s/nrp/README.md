@@ -332,6 +332,24 @@ Confirmed on 2026-09-14 from Cosmos (`VLLM_API_KEY` sourced from this worktree's
 repointed at a different underlying model, re-run this exact call and update both
 `.env.example`'s comment and kl-remote's `.env` — don't carry the old value forward.
 
+## Known issue: `docker-compose.yaml`'s postgres volume path needs overriding before deploy
+
+`docker/docker-compose.yaml`'s `postgres` service hardcodes a pgdata host
+volume path, `/sdsc/scc/ddp478/l1joseph/knightgpt/pgdata`, that does not
+correspond to Cosmos, kl-remote, or anywhere else currently reachable from
+this repo's own tooling -- it's stale from an earlier environment. Whoever
+deploys on kl-remote needs to override or fix this path to wherever
+Postgres data should actually persist there (a Compose override file,
+matching the pattern the now-removed `docker/docker-compose.local-test.yaml`
+used for the Cosmos singularity proof test, is the standard way to do this
+without editing the base file) **before** the first `docker compose up
+postgres` -- an unwritable or unintended path here fails silently into
+whatever Docker's default anonymous-volume behavior does for a bad host
+path, not with an obvious error. This was flagged during the Cosmos
+singularity proof test (`slurm/singularity_stack_proof_test.slurm`, Task 9)
+but is a real, pre-existing gap in the base compose file, not something
+introduced by or specific to that proof test.
+
 ## Re-ingestion after a kl-remote Postgres restore (one-time deploy step)
 
 This step is **not executable from Cosmos** — it requires a real, reachable Postgres, which

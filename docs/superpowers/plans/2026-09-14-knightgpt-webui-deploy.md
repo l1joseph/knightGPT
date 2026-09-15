@@ -1193,7 +1193,7 @@ with:
       - VLLM_INFERENCE_URL=${VLLM_INFERENCE_URL:-https://ellm.nrp-nautilus.io/v1}
       - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL:-qwen3-embedding}
       - VLLM_INFERENCE_MODEL=${VLLM_INFERENCE_MODEL:-qwen3}
-      - VLLM_API_KEY=${NRP_LLM_API_KEY}
+      - VLLM_API_KEY=${VLLM_API_KEY}
       - VLLM_EMBEDDING_DIM=${VLLM_EMBEDDING_DIM:?VLLM_EMBEDDING_DIM must be set explicitly -- run Task 8's dimension-discovery step and set it in kl-remote's .env before first deploy}
 ```
 

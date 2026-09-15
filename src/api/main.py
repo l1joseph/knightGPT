@@ -142,6 +142,7 @@ class HealthResponse(BaseModel):
     status: str
     embedding_server: bool
     inference_server: bool
+    postgres: bool
     chunks_loaded: int
     graph_nodes: int
     chunk_embeddings_count: int
@@ -195,24 +196,47 @@ async def health_check():
 
     chunks_count = 0
     graph_nodes = 0
+    postgres_healthy = False
     if _pool is not None:
+        # Narrowly scoped to just the connectivity + chunks-count query,
+        # separate from the graph.status() block below -- a prior version
+        # of this fix wrapped both in one try/except, which meant a total
+        # Postgres outage silently reported chunks_loaded=0 and (since
+        # `status` only ever considered embedding/inference health)
+        # status="healthy" over a dead database. postgres_healthy below
+        # makes a real outage visible instead of indistinguishable from
+        # "just no graph data yet".
         try:
             async with _pool.acquire() as conn:
                 chunks_count = await conn.fetchval("SELECT count(*) FROM chunks")
-                # graph.status() raises "registered table relation no
-                # longer exists" (pgGraph diagnostic PG000) after
-                # papers/chunks/chunk_edges are truncated without going
-                # through pgGraph's own interface -- exactly what the
-                # restore runbook does on every fresh deploy (see
-                # docker/postgres/init/02-restore-backup.sh). Caught here
-                # like the embedding/inference checks above, instead of
-                # letting it 500 the whole health check post-restore.
-                graph_status = await conn.fetchrow(
-                    "SELECT node_count FROM graph.status()"
-                )
-                graph_nodes = graph_status["node_count"] if graph_status else 0
+                postgres_healthy = True
         except Exception as e:
-            logger.error(f"Graph status check failed: {e}")
+            logger.error(f"Postgres health check failed: {e}")
+
+        if postgres_healthy:
+            try:
+                async with _pool.acquire() as conn:
+                    # graph.status() raises "registered table relation no
+                    # longer exists" (pgGraph diagnostic PG000) when
+                    # pgGraph's registration tables reference stale
+                    # pre-restore OIDs: pg_restore assigns brand-new OIDs
+                    # to the recreated chunks/chunk_edges tables, but the
+                    # restored graph._registered_tables/_registered_edges
+                    # rows still point at the OLD ones. See
+                    # docker/postgres/init/02-restore-backup.sh (which now
+                    # re-applies sql/schema.sql + graph.build() after
+                    # restore specifically to fix this) and
+                    # k8s/nrp/RESTORE.md for the full mechanism. Caught
+                    # narrowly here -- not the whole Postgres block above
+                    # -- so only a genuine graph-status issue degrades
+                    # gracefully; a real Postgres outage is still visible
+                    # via postgres_healthy.
+                    graph_status = await conn.fetchrow(
+                        "SELECT node_count FROM graph.status()"
+                    )
+                    graph_nodes = graph_status["node_count"] if graph_status else 0
+            except Exception as e:
+                logger.error(f"Graph status check failed: {e}")
 
     chunk_embeddings_count = 0
     if _duckdb_store is not None:
@@ -222,12 +246,17 @@ async def health_check():
         # call is serialized behind DuckDBStore's internal lock.
         chunk_embeddings_count = await asyncio.to_thread(_duckdb_store.count)
 
-    status = "healthy" if embedding_healthy and inference_healthy else "degraded"
+    status = (
+        "healthy"
+        if embedding_healthy and inference_healthy and postgres_healthy
+        else "degraded"
+    )
 
     return HealthResponse(
         status=status,
         embedding_server=embedding_healthy,
         inference_server=inference_healthy,
+        postgres=postgres_healthy,
         chunks_loaded=chunks_count,
         graph_nodes=graph_nodes,
         chunk_embeddings_count=chunk_embeddings_count,

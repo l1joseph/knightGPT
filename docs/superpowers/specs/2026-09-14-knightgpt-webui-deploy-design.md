@@ -144,7 +144,7 @@ Cloudflare (knightgpt.knight-lab-dev.org)
   to `https://ellm.nrp-nautilus.io/v1`; change `VLLM_EMBEDDING_MODEL` to
   `qwen3-embedding`, `VLLM_INFERENCE_MODEL` to `qwen3` (both confirmed
   exact model IDs via `curl .../v1/models` and NRP's own docs — not a
-  guess); add `VLLM_API_KEY` (new) sourced from `${NRP_LLM_API_KEY}`.
+  guess); add `VLLM_API_KEY` (new) sourced from `${VLLM_API_KEY}`.
 - `postgres` service: mount the restored dump file read-only into the
   container and reference it from a new init script (component 2 below).
 - No changes needed to `open-webui`, `watchtower`, or `cloudflared`
