@@ -538,8 +538,9 @@ async def agent_chat(request: AgentChatRequest):
     """
     Multi-agent RAG chat with tool use.
 
-    Uses a 4-stage pipeline (plan → execute → verify → generate)
-    with access to PubMed, OpenAlex, KEGG, and QIIME2 tools.
+    Runs a real OpenAI-style function-calling loop, giving the model
+    access to PubMed, OpenAlex, KEGG, and QIIME2 tools, until it returns
+    a final answer or the tool-round safety cap is hit.
     """
     from ..agents import AgentOrchestrator
 
@@ -552,12 +553,7 @@ async def agent_chat(request: AgentChatRequest):
 
     return {
         "answer": result.final_answer,
-        "plan": {
-            "tools_used": result.plan.tools_to_use if result.plan else [],
-            "sub_queries": result.plan.sub_queries if result.plan else [],
-            "reasoning": result.plan.reasoning if result.plan else "",
-        },
-        "citations": result.verified_citations[:10],
+        "tools_used": list(dict.fromkeys(r.tool_name for r in result.tool_results)),
         "tool_results_count": len(result.tool_results),
     }
 
