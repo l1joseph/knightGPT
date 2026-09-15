@@ -50,3 +50,12 @@ class BaseTool(ABC):
                 "required": ["query"],
             },
         }
+
+    @property
+    def openai_tool_schema(self) -> dict:
+        """This tool's .schema wrapped in the {type, function} envelope
+        OpenAI's tools=[...] function-calling parameter requires."""
+        return {
+            "type": "function",
+            "function": self.schema,
+        }
