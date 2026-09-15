@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ..agents import AgentOrchestrator
 from ..embedding import VLLMEmbedder
@@ -203,7 +204,7 @@ async def health_check():
         from openai import OpenAI
 
         client = OpenAI(
-            api_key="EMPTY",
+            api_key=settings.vllm.api_key,
             base_url=settings.vllm.inference_url,
         )
         # Quick health check
@@ -605,7 +606,13 @@ async def agent_chat(request: AgentChatRequest):
     """
     orchestrator = get_orchestrator()
 
-    result = orchestrator.run(request.message, top_k=request.top_k)
+    # orchestrator.run() makes blocking OpenAI client calls and can loop up
+    # to max_tool_rounds sequential round-trips -- offloaded to a worker
+    # thread so it doesn't stall the event loop for every other concurrent
+    # request, matching how /v1/chat/completions already handles this.
+    result = await run_in_threadpool(
+        orchestrator.run, request.message, top_k=request.top_k
+    )
 
     return {
         "answer": result.final_answer,
@@ -653,13 +660,14 @@ async def openai_chat_completions(request: Request):
     docs/superpowers/specs/2026-09-14-knightgpt-webui-deploy-design.md.
     """
     import uuid
-    from starlette.concurrency import run_in_threadpool
 
     from .sse_adapter import event_to_sse_chunks
 
     data = await request.json()
     messages = data.get("messages", [])
     stream = data.get("stream", False)
+    temperature = data.get("temperature", 0.3)
+    max_tokens = data.get("max_tokens", 2000)
 
     user_message = None
     for msg in reversed(messages):
@@ -686,7 +694,12 @@ async def openai_chat_completions(request: Request):
 
             def run_orchestrator() -> None:
                 try:
-                    orchestrator.run(user_message, on_event=on_event)
+                    orchestrator.run(
+                        user_message,
+                        on_event=on_event,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
                 finally:
                     event_queue.put(SENTINEL)
 
@@ -708,7 +721,11 @@ async def openai_chat_completions(request: Request):
     # Non-streaming: run the loop, collect events, build one response.
     events: list[dict] = []
     ctx = await run_in_threadpool(
-        orchestrator.run, user_message, on_event=events.append
+        orchestrator.run,
+        user_message,
+        on_event=events.append,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
     return {

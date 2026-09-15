@@ -18,6 +18,9 @@ from src.graph.duckdb_store import DuckDBStore
 from src.ingestion.doi_resolver import DEFAULT_PAPER_LISTS_DIR
 from src.ingestion.doi_resolver import build_doi_lookup as _build_doi_lookup
 from src.ingestion.doi_resolver import resolve_doi as _resolve_doi
+from src.utils import get_settings
+
+settings = get_settings()
 from src.utils import get_logger, get_settings, setup_logging
 
 logger = get_logger(__name__)
@@ -81,7 +84,7 @@ async def migrate(
     # never leaks the other: if asyncpg.connect() raises, store.close()
     # still runs via the outer finally; if closing conn raises, the outer
     # finally still runs afterward and closes store.
-    store = DuckDBStore(str(duckdb_path))
+    store = DuckDBStore(str(duckdb_path), dim=settings.vllm.embedding_dim)
     try:
         conn = await asyncpg.connect(dsn)
         try:

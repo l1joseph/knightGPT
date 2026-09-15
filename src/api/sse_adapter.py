@@ -24,8 +24,13 @@ def event_to_sse_chunks(event: dict[str, Any], chat_id: str) -> list[dict]:
 
     Args:
         event: one of {"type": "token", "content": str},
-            {"type": "tool_call", "tool_name": str, "args": dict, "call_id": str},
+            {"type": "tool_call", "tool_name": str, "args": dict,
+                "call_id": str, "index": int} (index is this call's position
+                among the tool calls requested in the same round, so
+                multiple simultaneous tool calls get distinct
+                tool_calls[i] slots instead of colliding on slot 0),
             {"type": "tool_result", ...} (produces no chunks),
+            {"type": "error", "message": str},
             {"type": "done"}.
         chat_id: the "id" field to stamp on every produced chunk.
 
@@ -47,7 +52,7 @@ def event_to_sse_chunks(event: dict[str, Any], chat_id: str) -> list[dict]:
             delta={
                 "tool_calls": [
                     {
-                        "index": 0,
+                        "index": event["index"],
                         "id": event["call_id"],
                         "type": "function",
                         "function": {
@@ -64,6 +69,16 @@ def event_to_sse_chunks(event: dict[str, Any], chat_id: str) -> list[dict]:
 
     if event_type == "tool_result":
         return []
+
+    if event_type == "error":
+        return [
+            _chunk(
+                chat_id,
+                delta={"content": f"\n\n[Error: {event['message']}]"},
+                finish_reason=None,
+            ),
+            _chunk(chat_id, delta={}, finish_reason="stop"),
+        ]
 
     if event_type == "done":
         return [_chunk(chat_id, delta={}, finish_reason="stop")]

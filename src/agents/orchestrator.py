@@ -85,6 +85,8 @@ class AgentOrchestrator:
         top_k: int = 5,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         max_tool_rounds: int = 5,
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
     ) -> AgentContext:
         """Run the function-calling agent loop.
 
@@ -93,10 +95,14 @@ class AgentOrchestrator:
             top_k: RAG retrieval depth (used only if self.retriever is set).
             on_event: optional callback fired synchronously for every
                 lifecycle event ({"type": "tool_call"|"tool_result"|
-                "token"|"done", ...} -- see src/api/sse_adapter.py for the
-                exact shapes consumed downstream).
+                "token"|"error"|"done", ...} -- see src/api/sse_adapter.py
+                for the exact shapes consumed downstream).
             max_tool_rounds: safety cap on tool-calling rounds; if hit, one
                 final answer is forced with no further tools offered.
+            temperature: sampling temperature for every LLM call this run
+                makes (both the per-round tool-calling calls and the forced
+                final-answer call).
+            max_tokens: max tokens for every LLM call this run makes.
         """
         emit = on_event or (lambda event: None)
         ctx = AgentContext(original_query=query)
@@ -119,13 +125,21 @@ class AgentOrchestrator:
         tool_schemas = [tool.openai_tool_schema for tool in self.tools.values()]
 
         for _round_num in range(max_tool_rounds):
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=tool_schemas,
-                temperature=0.3,
-                max_tokens=2000,
-            )
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=tool_schemas,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as e:
+                logger.error(f"LLM call failed: {e}")
+                ctx.final_answer = f"The language model request failed: {e}"
+                emit({"type": "error", "message": str(e)})
+                emit({"type": "done"})
+                return ctx
+
             choice = response.choices[0]
             tool_calls = getattr(choice.message, "tool_calls", None)
 
@@ -154,10 +168,12 @@ class AgentOrchestrator:
                 }
             )
 
-            for tc in tool_calls:
+            for call_index, tc in enumerate(tool_calls):
                 tool_name = tc.function.name
                 try:
                     args = json.loads(tc.function.arguments)
+                    if not isinstance(args, dict):
+                        args = {}
                 except json.JSONDecodeError:
                     args = {}
                 emit(
@@ -166,6 +182,7 @@ class AgentOrchestrator:
                         "tool_name": tool_name,
                         "args": args,
                         "call_id": tc.id,
+                        "index": call_index,
                     }
                 )
 
@@ -203,18 +220,26 @@ class AgentOrchestrator:
 
         # max_tool_rounds exhausted without a final answer -- force one,
         # with no tools offered so the model cannot request yet another round.
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages
-            + [
-                {
-                    "role": "user",
-                    "content": "Provide your best answer now with the information gathered so far.",
-                }
-            ],
-            temperature=0.3,
-            max_tokens=2000,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages
+                + [
+                    {
+                        "role": "user",
+                        "content": "Provide your best answer now with the information gathered so far.",
+                    }
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as e:
+            logger.error(f"LLM call failed: {e}")
+            ctx.final_answer = f"The language model request failed: {e}"
+            emit({"type": "error", "message": str(e)})
+            emit({"type": "done"})
+            return ctx
+
         answer = response.choices[0].message.content or ""
         ctx.final_answer = answer
         emit({"type": "token", "content": answer})

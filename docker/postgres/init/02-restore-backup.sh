@@ -11,7 +11,34 @@ set -euo pipefail
 pg_restore -U postgres -d knightgpt --no-owner --if-exists --clean \
   /docker-entrypoint-initdb.d/backup.dump
 
+# CASCADE is required here because paper_study_links/qiita_study_publications
+# (defined only in the restored dump, not in sql/schema.sql) reference
+# papers/chunks by foreign key -- a plain TRUNCATE of just
+# papers/chunks/chunk_edges is refused by Postgres unless every table with
+# such a reference is truncated in the same statement. CASCADE grants that
+# by truncating the referencing tables too, which would silently wipe the
+# very Qiita data this restore exists to preserve if it ever reached tables
+# outside papers/chunks/chunk_edges themselves. Snapshot counts before and
+# verify after, rather than trusting CASCADE only touched what we intended.
+QIITA_STUDIES_BEFORE=$(psql -U postgres -d knightgpt -tAc "SELECT count(*) FROM qiita_studies")
+QIITA_PUBS_BEFORE=$(psql -U postgres -d knightgpt -tAc "SELECT count(*) FROM qiita_study_publications")
+PAPER_LINKS_BEFORE=$(psql -U postgres -d knightgpt -tAc "SELECT count(*) FROM paper_study_links")
+
 psql -U postgres -d knightgpt -c "TRUNCATE papers, chunks, chunk_edges CASCADE;"
+
+QIITA_STUDIES_AFTER=$(psql -U postgres -d knightgpt -tAc "SELECT count(*) FROM qiita_studies")
+QIITA_PUBS_AFTER=$(psql -U postgres -d knightgpt -tAc "SELECT count(*) FROM qiita_study_publications")
+PAPER_LINKS_AFTER=$(psql -U postgres -d knightgpt -tAc "SELECT count(*) FROM paper_study_links")
+
+if [ "$QIITA_STUDIES_BEFORE" != "$QIITA_STUDIES_AFTER" ] \
+  || [ "$QIITA_PUBS_BEFORE" != "$QIITA_PUBS_AFTER" ] \
+  || [ "$PAPER_LINKS_BEFORE" != "$PAPER_LINKS_AFTER" ]; then
+  echo "FATAL: TRUNCATE ... CASCADE reached the Qiita tables it must not touch." >&2
+  echo "  qiita_studies: $QIITA_STUDIES_BEFORE -> $QIITA_STUDIES_AFTER" >&2
+  echo "  qiita_study_publications: $QIITA_PUBS_BEFORE -> $QIITA_PUBS_AFTER" >&2
+  echo "  paper_study_links: $PAPER_LINKS_BEFORE -> $PAPER_LINKS_AFTER" >&2
+  exit 1
+fi
 
 # pg_restore assigns brand-new OIDs to the recreated chunks/chunk_edges
 # tables, but the restored graph._registered_tables/_registered_edges rows

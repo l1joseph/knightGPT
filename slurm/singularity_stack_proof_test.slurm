@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=stack-proof-singularity
-#SBATCH --output=/cosmos/nfs/home/l1joseph/knightGPT/logs/%x_%j.out
-#SBATCH --error=/cosmos/nfs/home/l1joseph/knightGPT/logs/%x_%j.err
+#SBATCH --output=/cosmos/nfs/home/l1joseph/knightGPT/.worktrees/qiita-knightgpt-webui-deploy/logs/%x_%j.out
+#SBATCH --error=/cosmos/nfs/home/l1joseph/knightGPT/.worktrees/qiita-knightgpt-webui-deploy/logs/%x_%j.err
 #SBATCH --partition=cluster
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

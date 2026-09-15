@@ -221,7 +221,9 @@ def run_batch_ingestion(
     chunker = SemanticChunker()
     embedder = VLLMEmbedder()
     wait_for_embedder_ready(embedder)
-    store = DuckDBStore(str(settings.ingestion.duckdb_path))
+    store = DuckDBStore(
+        str(settings.ingestion.duckdb_path), dim=settings.vllm.embedding_dim
+    )
 
     batch_results = []
     try:
