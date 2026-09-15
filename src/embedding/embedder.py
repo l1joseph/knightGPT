@@ -62,7 +62,7 @@ class VLLMEmbedder:
         """
         self.api_base = api_base or settings.vllm.embedding_url
         self.model = model or settings.vllm.embedding_model
-        self.api_key = api_key
+        self.api_key = api_key or settings.vllm.api_key
         self.batch_size = batch_size
         self.timeout = timeout
         

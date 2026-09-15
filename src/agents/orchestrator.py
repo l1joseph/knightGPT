@@ -119,7 +119,7 @@ class AgentOrchestrator:
 
         # LLM client for agent reasoning
         self.client = OpenAI(
-            api_key="EMPTY",
+            api_key=settings.vllm.api_key,
             base_url=settings.vllm.inference_url,
         )
         self.model = settings.vllm.inference_model

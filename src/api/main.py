@@ -47,7 +47,9 @@ async def lifespan(app: FastAPI):
     # support.
     _pool = await get_pg_pool()
     logger.info(f"DuckDB store: {settings.ingestion.duckdb_path.resolve()}")
-    _duckdb_store = DuckDBStore(str(settings.ingestion.duckdb_path))
+    _duckdb_store = DuckDBStore(
+        str(settings.ingestion.duckdb_path), dim=settings.vllm.embedding_dim
+    )
     _retriever = HybridRetriever(duckdb_store=_duckdb_store)
     _rag_engine = RAGEngine(retriever=_retriever)
     logger.info("RAG engine initialized (Postgres+DuckDB-backed)")
