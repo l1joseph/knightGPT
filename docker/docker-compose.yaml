@@ -17,10 +17,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - VLLM_EMBEDDING_URL=${VLLM_EMBEDDING_URL:-http://host.docker.internal:8001/v1}
-      - VLLM_INFERENCE_URL=${VLLM_INFERENCE_URL:-http://host.docker.internal:8000/v1}
-      - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL:-Alibaba-NLP/gte-Qwen2-7B-instruct}
-      - VLLM_INFERENCE_MODEL=${VLLM_INFERENCE_MODEL:-meta-llama/Llama-3.3-70B-Instruct}
+      - VLLM_EMBEDDING_URL=${VLLM_EMBEDDING_URL:-https://ellm.nrp-nautilus.io/v1}
+      - VLLM_INFERENCE_URL=${VLLM_INFERENCE_URL:-https://ellm.nrp-nautilus.io/v1}
+      - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL:-qwen3-embedding}
+      - VLLM_INFERENCE_MODEL=${VLLM_INFERENCE_MODEL:-qwen3}
+      - VLLM_API_KEY=${NRP_LLM_API_KEY}
+      - VLLM_EMBEDDING_DIM=${VLLM_EMBEDDING_DIM:?VLLM_EMBEDDING_DIM must be set explicitly -- run Task 8's dimension-discovery step and set it in kl-remote's .env before first deploy}
       - POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD:-password}@postgres:5432/knightgpt
       # DuckDB opens this file read-write (embedded, in-process vector
       # store -- see src/graph/duckdb_store.py) and cannot live under the
