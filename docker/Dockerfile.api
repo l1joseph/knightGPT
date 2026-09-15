@@ -27,8 +27,13 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # Copy application code
+# NOTE: there is no configs/ directory anywhere in this repo (verified via
+# `find . -iname 'config*'` and a full history search) -- an earlier COPY
+# configs/ ./configs/ line here referenced a directory that has never
+# existed, which would fail any real build (docker or singularity) that
+# actually reaches this step. Removed rather than papering over it with an
+# empty placeholder directory nothing reads.
 COPY src/ ./src/
-COPY configs/ ./configs/
 
 # Create data directories
 RUN mkdir -p data/raw_pdfs data/markdown data/processed logs && \

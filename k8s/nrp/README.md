@@ -355,7 +355,7 @@ starting the `api`/`open-webui` containers:
    ```bash
    POSTGRES_DSN="postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt" \
    VLLM_EMBEDDING_URL="https://ellm.nrp-nautilus.io/v1" \
-   VLLM_API_KEY="$NRP_LLM_API_KEY" \
+   VLLM_API_KEY="$VLLM_API_KEY" \
    VLLM_EMBEDDING_MODEL="qwen3-embedding" \
    ~/miniforge3/envs/knightGPT/bin/python -c "
    from scripts.nrp_batch_ingest import run_batch_ingestion

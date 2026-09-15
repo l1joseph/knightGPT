@@ -52,6 +52,14 @@ google-api-python-client>=2.116.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 
+# Zotero integration (src/tools/zotero.py imports pyzotero -- was missing
+# here entirely, confirmed via a real `ModuleNotFoundError: No module
+# named 'pyzotero'` crashing /v1/chat/completions, since it imports the
+# full tool registry via src/tools/__init__.py -> ZoteroTool at import
+# time. Would break the real deployment identically, not just this proof
+# test.)
+pyzotero>=1.5.0
+
 # Logging and monitoring
 loguru>=0.7.2
 rich>=13.7.0

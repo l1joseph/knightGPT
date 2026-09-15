@@ -196,10 +196,23 @@ async def health_check():
     chunks_count = 0
     graph_nodes = 0
     if _pool is not None:
-        async with _pool.acquire() as conn:
-            chunks_count = await conn.fetchval("SELECT count(*) FROM chunks")
-            graph_status = await conn.fetchrow("SELECT node_count FROM graph.status()")
-            graph_nodes = graph_status["node_count"] if graph_status else 0
+        try:
+            async with _pool.acquire() as conn:
+                chunks_count = await conn.fetchval("SELECT count(*) FROM chunks")
+                # graph.status() raises "registered table relation no
+                # longer exists" (pgGraph diagnostic PG000) after
+                # papers/chunks/chunk_edges are truncated without going
+                # through pgGraph's own interface -- exactly what the
+                # restore runbook does on every fresh deploy (see
+                # docker/postgres/init/02-restore-backup.sh). Caught here
+                # like the embedding/inference checks above, instead of
+                # letting it 500 the whole health check post-restore.
+                graph_status = await conn.fetchrow(
+                    "SELECT node_count FROM graph.status()"
+                )
+                graph_nodes = graph_status["node_count"] if graph_status else 0
+        except Exception as e:
+            logger.error(f"Graph status check failed: {e}")
 
     chunk_embeddings_count = 0
     if _duckdb_store is not None:
