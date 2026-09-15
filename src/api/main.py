@@ -1,6 +1,7 @@
 """FastAPI application for KnightGPT RAG API."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -590,20 +591,22 @@ async def list_models():
 
 
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(
-    request: Request,
-    rag_engine: RAGEngine = Depends(get_rag_engine),
-):
+async def openai_chat_completions(request: Request):
     """
-    OpenAI-compatible chat completions endpoint.
+    OpenAI-compatible chat completions endpoint, backed by the real
+    multi-tool agent loop (not plain RAG) -- see
+    docs/superpowers/specs/2026-09-14-knightgpt-webui-deploy-design.md.
+    """
+    import uuid
+    from starlette.concurrency import run_in_threadpool
 
-    For integration with Open WebUI and other OpenAI-compatible clients.
-    """
+    from ..agents.orchestrator import AgentOrchestrator
+    from .sse_adapter import event_to_sse_chunks
+
     data = await request.json()
     messages = data.get("messages", [])
     stream = data.get("stream", False)
 
-    # Get the last user message
     user_message = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -613,74 +616,62 @@ async def openai_chat_completions(
     if not user_message:
         raise HTTPException(status_code=400, detail="No user message found")
 
+    chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    orchestrator = AgentOrchestrator(
+        retriever=get_retriever(), rag_engine=get_rag_engine()
+    )
+
     if stream:
 
         async def generate():
-            async for token in rag_engine.query_stream(
-                question=user_message,
-                top_k=5,
-                max_tokens=data.get("max_tokens", 1024),
-                temperature=data.get("temperature", 0.7),
-            ):
-                chunk = {
-                    "id": "chatcmpl-knightgpt",
-                    "object": "chat.completion.chunk",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": token},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {__import__('json').dumps(chunk)}\n\n"
+            import queue as sync_queue
 
-            # Final chunk
-            final_chunk = {
-                "id": "chatcmpl-knightgpt",
-                "object": "chat.completion.chunk",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-            yield f"data: {__import__('json').dumps(final_chunk)}\n\n"
+            event_queue: sync_queue.Queue = sync_queue.Queue()
+            SENTINEL = object()
+
+            def on_event(event: dict) -> None:
+                event_queue.put(event)
+
+            def run_orchestrator() -> None:
+                try:
+                    orchestrator.run(user_message, on_event=on_event)
+                finally:
+                    event_queue.put(SENTINEL)
+
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            future = loop.run_in_executor(None, run_orchestrator)
+
+            while True:
+                event = await run_in_threadpool(event_queue.get)
+                if event is SENTINEL:
+                    break
+                for chunk in event_to_sse_chunks(event, chat_id):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+
+            await future
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(
-            generate(),
-            media_type="text/event-stream",
-        )
+        return StreamingResponse(generate(), media_type="text/event-stream")
 
-    # Non-streaming
-    response = await rag_engine.query_async(
-        question=user_message,
-        top_k=5,
-        max_tokens=data.get("max_tokens", 1024),
-        temperature=data.get("temperature", 0.7),
+    # Non-streaming: run the loop, collect events, build one response.
+    events: list[dict] = []
+    ctx = await run_in_threadpool(
+        orchestrator.run, user_message, on_event=events.append
     )
 
     return {
-        "id": "chatcmpl-knightgpt",
+        "id": chat_id,
         "object": "chat.completion",
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": response.answer,
-                },
+                "message": {"role": "assistant", "content": ctx.final_answer},
                 "finish_reason": "stop",
             }
         ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 
