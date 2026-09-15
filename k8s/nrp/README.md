@@ -346,11 +346,11 @@ starting the `api`/`open-webui` containers:
 1. Confirm `VLLM_EMBEDDING_DIM` is set correctly in kl-remote's `.env` per the discovery
    step above — do not skip this even if it "worked before"; re-verify against a live call
    if there's any doubt the endpoint's model has changed.
-2. Run the same 3-paper local ingestion logic already proven during the 2026-08-28 demo,
-   scoped to `data/paper_lists/initial_papers.txt` only, pointed at kl-remote's Postgres
-   (reachable directly at `postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt`
-   since this Postgres runs locally on kl-remote — no port-forward needed, unlike the NRP
-   in-cluster DSN documented above) and the NRP embedding endpoint:
+2. Run the same local ingestion logic already exercised during the 2026-08-28 demo,
+   pointed at kl-remote's Postgres (reachable directly at
+   `postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt` since this Postgres
+   runs locally on kl-remote — no port-forward needed, unlike the NRP in-cluster DSN
+   documented above) and the NRP embedding endpoint:
 
    ```bash
    POSTGRES_DSN="postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt" \
@@ -364,9 +364,39 @@ starting the `api`/`open-webui` containers:
    "
    ```
 
+   **This does not precisely scope ingestion to 3 specific DOIs from
+   `initial_papers.txt`, and it did not during the 2026-08-28 demo either — know this going
+   in, don't be surprised by it:**
+   - `run_batch_ingestion()` unconditionally appends the derived long-read DOI list to
+     whatever `paper_lists` you pass (`all_lists = list(paper_lists) +
+     [ensure_longread_dois_derived()]`, `scripts/nrp_batch_ingest.py` ~line 208), so Phase 1
+     will also attempt to download those long-read papers. In the 2026-08-28 demo these
+     downloads mostly failed locally due to a missing `marker-pdf` dependency — a known,
+     harmless side effect that does not block the 3-paper result. Expect the same failures
+     here and ignore them unless *all* downloads fail.
+   - Phase 2 does not select markdown files per-list — it takes
+     `sorted(markdown_dir.rglob("*.md"))[:max_papers]` across the **entire shared markdown
+     directory**, not filtered by which list a paper's DOI came from. So `max_papers=3`
+     ingests whichever 3 files sort first alphabetically among everything already converted
+     to markdown in that directory — not guaranteed to be `initial_papers.txt`'s first 3
+     DOIs, or even DOIs from `initial_papers.txt` at all if other papers' markdown already
+     exists there. This is exactly what happened on 2026-08-28: the operator targeted 3
+     specific DOIs and got 3 *different*, but still real, papers instead — and the demo
+     still succeeded, because verification only needs 3 real papers with real chunks, not
+     specific ones.
+   - Bottom line: treat this command as producing "some small number (≤3) of real,
+     fully-ingested papers for verification," not as a precise, reproducible selection of
+     `initial_papers.txt`'s first 3 DOIs. If exact DOI selection ever matters for a future
+     use of this script, that would require a code change to `nrp_batch_ingest.py`
+     (out of scope here — that script is pre-existing and untouched by this task).
+
 3. Verify afterward (live-verification, matching the design spec's Testing section
-   convention of live-verifying real infra rather than unit-testing it):
-   - `SELECT count(*) FROM papers;` → `3`
+   convention of live-verifying real infra rather than unit-testing it). Because of the
+   scoping caveat above, verify counts and content quality, not which specific papers
+   landed:
+   - `SELECT count(*) FROM papers;` → `3` (or fewer, if `max_papers` files include papers
+     already present from a prior run — see the caveat above; a lower count here is a
+     signal to check what actually got ingested, not necessarily a failure)
    - `SELECT count(*) FROM chunks;` → `> 0`
    - `SELECT count(*) FROM chunk_edges;` → `> 0`
    - Spot-check one row, e.g. `SELECT content FROM chunks LIMIT 1;`, and confirm it has
