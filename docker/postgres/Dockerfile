@@ -38,6 +38,6 @@ COPY --from=pggraph-builder /src/pggraph/graph/target/release/graph-pg${PG_MAJOR
     /usr/lib/postgresql/${PG_MAJOR}/lib/
 
 ENV POSTGRES_DB=knightgpt
-COPY docker/postgres/init/01-create-extensions.sql /docker-entrypoint-initdb.d/
+COPY docker/postgres/init/ /docker-entrypoint-initdb.d/
 
 CMD ["postgres", "-c", "shared_preload_libraries=graph"]

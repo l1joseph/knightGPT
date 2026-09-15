@@ -86,6 +86,7 @@ services:
       - POSTGRES_DB=knightgpt
     volumes:
       - /sdsc/scc/ddp478/l1joseph/knightgpt/pgdata:/var/lib/postgresql/data
+      - /cosmos/vast/scratch/l1joseph/knightgpt/deploy/knightgpt-postgres-20260904-024751.dump:/docker-entrypoint-initdb.d/backup.dump:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres", "-d", "knightgpt"]
       interval: 10s
