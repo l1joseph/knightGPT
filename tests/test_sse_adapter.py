@@ -7,7 +7,9 @@ import pytest
 def test_token_event_becomes_content_delta_chunk():
     from src.api.sse_adapter import event_to_sse_chunks
 
-    chunks = event_to_sse_chunks({"type": "token", "content": "Hello"}, chat_id="chatcmpl-1")
+    chunks = event_to_sse_chunks(
+        {"type": "token", "content": "Hello"}, chat_id="chatcmpl-1"
+    )
 
     assert chunks == [
         {

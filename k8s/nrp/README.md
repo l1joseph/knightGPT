@@ -350,6 +350,25 @@ singularity proof test (`slurm/singularity_stack_proof_test.slurm`, Task 9)
 but is a real, pre-existing gap in the base compose file, not something
 introduced by or specific to that proof test.
 
+The `postgres` service's other volume line has the identical problem for a
+different path: `docker/docker-compose.yaml:89` mounts
+`/cosmos/vast/scratch/l1joseph/knightgpt/deploy/knightgpt-postgres-20260904-024751.dump`
+-- a Cosmos-only absolute path that does not exist on kl-remote either.
+Docker silently bind-mounts an empty directory over a nonexistent host path,
+so `pg_restore` fails there with a directory-not-a-file error rather than a
+clear "file not found." Fetch the actual dump from its S3 backup location
+first, then override the mount path (the same Compose-override mechanism as
+the pgdata path above) to wherever it lands on kl-remote:
+
+```bash
+mkdir -p /path/on/kl-remote/knightgpt-deploy
+rclone copy nrp-s3:l1joseph-evo2-test/knightgpt-postgres-backup/20260904-024751/knightgpt-postgres-20260904-024751.dump \
+    /path/on/kl-remote/knightgpt-deploy/
+```
+
+(same command as the plan's own Step 1 for fetching this backup, just
+pointed at a kl-remote path instead of Cosmos scratch).
+
 ## Re-ingestion after a kl-remote Postgres restore (one-time deploy step)
 
 This step is **not executable from Cosmos** — it requires a real, reachable Postgres, which
@@ -417,7 +436,7 @@ starting the `api`/`open-webui` containers:
      signal to check what actually got ingested, not necessarily a failure)
    - `SELECT count(*) FROM chunks;` → `> 0`
    - `SELECT count(*) FROM chunk_edges;` → `> 0`
-   - Spot-check one row, e.g. `SELECT content FROM chunks LIMIT 1;`, and confirm it has
+   - Spot-check one row, e.g. `SELECT text FROM chunks LIMIT 1;`, and confirm it has
      real, non-null, non-empty text — not just a non-zero row count.
 
 Only once all four checks pass should `api`/`open-webui` be started

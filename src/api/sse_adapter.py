@@ -37,7 +37,9 @@ def event_to_sse_chunks(event: dict[str, Any], chat_id: str) -> list[dict]:
     event_type = event["type"]
 
     if event_type == "token":
-        return [_chunk(chat_id, delta={"content": event["content"]}, finish_reason=None)]
+        return [
+            _chunk(chat_id, delta={"content": event["content"]}, finish_reason=None)
+        ]
 
     if event_type == "tool_call":
         tool_call_chunk = _chunk(
