@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..agents import AgentOrchestrator
 from ..embedding import VLLMEmbedder
 from ..graph import insert_chunks, DuckDBStore
 from ..ingestion import (
@@ -30,12 +31,13 @@ _pool = None
 _retriever: Optional[HybridRetriever] = None
 _rag_engine: Optional[RAGEngine] = None
 _duckdb_store: Optional[DuckDBStore] = None
+_orchestrator: Optional[AgentOrchestrator] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global _pool, _retriever, _rag_engine, _duckdb_store
+    global _pool, _retriever, _rag_engine, _duckdb_store, _orchestrator
 
     # _pool backs the /api/v1/ingest background task's insert_chunks() calls
     # (always awaited from this loop). _duckdb_store is the embedded vector
@@ -54,6 +56,12 @@ async def lifespan(app: FastAPI):
     _retriever = HybridRetriever(duckdb_store=_duckdb_store)
     _rag_engine = RAGEngine(retriever=_retriever)
     logger.info("RAG engine initialized (Postgres+DuckDB-backed)")
+    # Built once here (owns an OpenAI client + its own httpx connection pool
+    # to the NRP endpoint) rather than per-request, so /v1/chat/completions
+    # and /api/v1/agent/chat -- the actual hot paths for Open WebUI traffic
+    # -- reuse one keep-alive connection instead of paying fresh TLS/TCP
+    # setup on every call.
+    _orchestrator = AgentOrchestrator(retriever=_retriever)
 
     yield
 
@@ -168,6 +176,16 @@ def get_retriever() -> HybridRetriever:
     return _retriever
 
 
+def get_orchestrator() -> AgentOrchestrator:
+    """Dependency for the shared agent orchestrator."""
+    if _orchestrator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent orchestrator not initialized. No data loaded.",
+        )
+    return _orchestrator
+
+
 # Routes
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -198,24 +216,24 @@ async def health_check():
     graph_nodes = 0
     postgres_healthy = False
     if _pool is not None:
-        # Narrowly scoped to just the connectivity + chunks-count query,
-        # separate from the graph.status() block below -- a prior version
-        # of this fix wrapped both in one try/except, which meant a total
-        # Postgres outage silently reported chunks_loaded=0 and (since
-        # `status` only ever considered embedding/inference health)
-        # status="healthy" over a dead database. postgres_healthy below
-        # makes a real outage visible instead of indistinguishable from
-        # "just no graph data yet".
-        try:
-            async with _pool.acquire() as conn:
+        # chunks-count and graph.status() are checked as two independent
+        # try/except blocks over one shared connection -- not one try/except
+        # around both -- so a total Postgres outage stays distinguishable
+        # from "just no graph data yet". An earlier version wrapped both
+        # queries in a single try/except, which meant a total Postgres
+        # outage silently reported chunks_loaded=0 and (since `status` only
+        # ever considered embedding/inference health) status="healthy" over
+        # a dead database. postgres_healthy below makes a real outage
+        # visible instead.
+        async with _pool.acquire() as conn:
+            try:
                 chunks_count = await conn.fetchval("SELECT count(*) FROM chunks")
                 postgres_healthy = True
-        except Exception as e:
-            logger.error(f"Postgres health check failed: {e}")
+            except Exception as e:
+                logger.error(f"Postgres health check failed: {e}")
 
-        if postgres_healthy:
-            try:
-                async with _pool.acquire() as conn:
+            if postgres_healthy:
+                try:
                     # graph.status() raises "registered table relation no
                     # longer exists" (pgGraph diagnostic PG000) when
                     # pgGraph's registration tables reference stale
@@ -235,8 +253,8 @@ async def health_check():
                         "SELECT node_count FROM graph.status()"
                     )
                     graph_nodes = graph_status["node_count"] if graph_status else 0
-            except Exception as e:
-                logger.error(f"Graph status check failed: {e}")
+                except Exception as e:
+                    logger.error(f"Graph status check failed: {e}")
 
     chunk_embeddings_count = 0
     if _duckdb_store is not None:
@@ -585,12 +603,7 @@ async def agent_chat(request: AgentChatRequest):
     access to PubMed, OpenAlex, KEGG, and QIIME2 tools, until it returns
     a final answer or the tool-round safety cap is hit.
     """
-    from ..agents import AgentOrchestrator
-
-    orchestrator = AgentOrchestrator(
-        retriever=_retriever,
-        rag_engine=_rag_engine,
-    )
+    orchestrator = get_orchestrator()
 
     result = orchestrator.run(request.message, top_k=request.top_k)
 
@@ -642,7 +655,6 @@ async def openai_chat_completions(request: Request):
     import uuid
     from starlette.concurrency import run_in_threadpool
 
-    from ..agents.orchestrator import AgentOrchestrator
     from .sse_adapter import event_to_sse_chunks
 
     data = await request.json()
@@ -659,9 +671,7 @@ async def openai_chat_completions(request: Request):
         raise HTTPException(status_code=400, detail="No user message found")
 
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    orchestrator = AgentOrchestrator(
-        retriever=get_retriever(), rag_engine=get_rag_engine()
-    )
+    orchestrator = get_orchestrator()
 
     if stream:
 
@@ -679,8 +689,6 @@ async def openai_chat_completions(request: Request):
                     orchestrator.run(user_message, on_event=on_event)
                 finally:
                     event_queue.put(SENTINEL)
-
-            import asyncio
 
             loop = asyncio.get_event_loop()
             future = loop.run_in_executor(None, run_orchestrator)

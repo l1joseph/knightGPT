@@ -46,7 +46,6 @@ def test_run_emits_tool_call_then_tool_result_then_token_then_done(monkeypatch):
 
     orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
     orchestrator.retriever = None
-    orchestrator.rag_engine = None
     orchestrator.tools = {"fake_tool": FakeTool()}
     orchestrator.client = MagicMock()
     orchestrator.model = "qwen3"
@@ -74,7 +73,6 @@ def test_run_with_no_tool_calls_emits_only_token_and_done(monkeypatch):
 
     orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
     orchestrator.retriever = None
-    orchestrator.rag_engine = None
     orchestrator.tools = {}
     orchestrator.client = MagicMock()
     orchestrator.model = "qwen3"
@@ -104,7 +102,6 @@ def test_run_stops_at_max_tool_rounds():
 
     orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
     orchestrator.retriever = None
-    orchestrator.rag_engine = None
     orchestrator.tools = {"fake_tool": FakeTool()}
     orchestrator.client = MagicMock()
     orchestrator.model = "qwen3"

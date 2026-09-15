@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from openai import OpenAI
 
-from ..retrieval import BaseRetriever, RAGEngine
+from ..retrieval import BaseRetriever
 from ..tools.base import BaseTool, ToolResult
 from ..tools.pubmed import PubMedTool
 from ..tools.openalex import OpenAlexTool
@@ -47,7 +47,6 @@ class AgentContext:
     original_query: str = ""
     tool_results: list[ToolResult] = field(default_factory=list)
     rag_context: str = ""
-    verified_citations: list[dict] = field(default_factory=list)
     final_answer: str = ""
 
 
@@ -64,10 +63,8 @@ class AgentOrchestrator:
     def __init__(
         self,
         retriever: BaseRetriever | None = None,
-        rag_engine: RAGEngine | None = None,
     ):
         self.retriever = retriever
-        self.rag_engine = rag_engine
 
         self.tools: dict[str, BaseTool] = {
             "pubmed_search": PubMedTool(),
@@ -121,12 +118,11 @@ class AgentOrchestrator:
 
         tool_schemas = [tool.openai_tool_schema for tool in self.tools.values()]
 
-        for round_num in range(max_tool_rounds):
-            offer_tools = round_num < max_tool_rounds
+        for _round_num in range(max_tool_rounds):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                tools=tool_schemas if offer_tools else None,
+                tools=tool_schemas,
                 temperature=0.3,
                 max_tokens=2000,
             )
