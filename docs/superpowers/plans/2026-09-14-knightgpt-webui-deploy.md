@@ -1415,16 +1415,211 @@ new convention unprompted.)
 
 ---
 
+### Task 9: Local proof test of the full stack via rootless podman + SLURM
+
+Docker itself isn't available here, but `podman` (rootless, no root
+required) is installed and functional — confirmed directly (`podman
+info` returns real host info despite rootless subuid/subgid warnings).
+This task stands up the actual compose stack — real Postgres image build
+(pgGraph included), real restore, real API + Open WebUI containers — as
+close to kl-remote's real conditions as this environment allows, without
+touching kl-remote itself. It is not a guarantee kl-remote will behave
+identically (different host, real Docker there, an existing shared
+reverse proxy), but it catches real bugs (bad Dockerfile syntax, compose
+wiring mistakes, the restore script, actual API+Open WebUI+Postgres
+integration) before they cost a cycle on kl-remote.
+
+**Files:**
+- Create: `docker/docker-compose.local-test.yaml` (a Compose override —
+  standard Compose mechanism for env-specific values, not a fork of the
+  real file; kl-remote's deploy never references this file)
+- No changes to `docker/docker-compose.yaml` itself — the override
+  supplies only what differs for local testing (volume host paths,
+  dropping the `production`-profiled `cloudflared`/`watchtower` services
+  this test doesn't need).
+
+**Interfaces:**
+- Consumes: Tasks 6-8's finished `docker/docker-compose.yaml`,
+  `docker/postgres/`, and the `VLLM_EMBEDDING_DIM` value discovered in
+  Task 8.
+- Produces: a pass/fail proof-test result reported alongside the other
+  tasks — not new code other tasks depend on.
+
+- [ ] **Step 1: Install `podman-compose` (no root needed, isolated venv)**
+
+```bash
+mkdir -p /cosmos/vast/scratch/l1joseph/knightgpt/podman-compose-venv
+python3 -m venv /cosmos/vast/scratch/l1joseph/knightgpt/podman-compose-venv
+/cosmos/vast/scratch/l1joseph/knightgpt/podman-compose-venv/bin/pip install podman-compose
+```
+
+- [ ] **Step 2: Write the local-test override file**
+
+Create `docker/docker-compose.local-test.yaml`:
+
+```yaml
+# Local proof-test overrides for running the real stack via rootless
+# podman on Cosmos, ahead of the real kl-remote deploy. NOT used by the
+# real deploy -- kl-remote runs docker/docker-compose.yaml directly.
+# Overrides only what differs here: volume host paths (the base file's
+# postgres pgdata path, /sdsc/scc/ddp478/..., isn't valid on Cosmos or
+# apparently anywhere else currently reachable -- flagged separately,
+# not fixed here, since fixing the base file's path is a real but
+# separate cleanup this plan didn't scope).
+services:
+  postgres:
+    volumes:
+      - /cosmos/vast/scratch/l1joseph/knightgpt/podman-test-pgdata:/var/lib/postgresql/data
+      - /cosmos/vast/scratch/l1joseph/knightgpt/deploy/knightgpt-postgres-20260904-024751.dump:/docker-entrypoint-initdb.d/backup.dump:ro
+  api:
+    volumes:
+      - /cosmos/vast/scratch/l1joseph/knightgpt/podman-test-duckdb:/app/duckdb_data
+```
+
+- [ ] **Step 3: Write a SLURM job to build and run the stack**
+
+Building the Postgres image (Rust/cargo-pgrx compile) is real compute —
+must not run on the login node directly, per this project's resource
+rules. Create `slurm/podman_stack_proof_test.slurm`:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=proof-test-podman-stack
+#SBATCH --output=/cosmos/nfs/home/l1joseph/knightGPT/logs/%x_%j.out
+#SBATCH --error=/cosmos/nfs/home/l1joseph/knightGPT/logs/%x_%j.err
+#SBATCH --time=00:45:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+
+set -euo pipefail
+
+REPO=/cosmos/nfs/home/l1joseph/knightGPT/.worktrees/qiita-knightgpt-webui-deploy
+VENV=/cosmos/vast/scratch/l1joseph/knightgpt/podman-compose-venv
+cd "$REPO"
+
+export PATH="$VENV/bin:$PATH"
+export DOCKER_HOST="unix://$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || echo /tmp/podman.sock)"
+
+# podman-compose reads docker-compose.yaml by default; -f order matters,
+# later files override earlier ones.
+podman-compose -f docker/docker-compose.yaml -f docker/docker-compose.local-test.yaml \
+  up -d --build postgres
+
+echo "Waiting for postgres healthcheck..."
+for i in $(seq 1 30); do
+  status=$(podman inspect --format '{{.State.Health.Status}}' knightgpt-postgres 2>/dev/null || echo "starting")
+  [ "$status" = "healthy" ] && break
+  sleep 5
+done
+[ "$status" = "healthy" ] || { echo "postgres never became healthy"; podman logs knightgpt-postgres; exit 1; }
+
+echo "Verifying restore..."
+podman exec knightgpt-postgres psql -U postgres -d knightgpt -t -c \
+  "SELECT 'qiita_studies=' || count(*) FROM qiita_studies
+   UNION ALL SELECT 'qiita_study_publications=' || count(*) FROM qiita_study_publications
+   UNION ALL SELECT 'paper_study_links=' || count(*) FROM paper_study_links
+   UNION ALL SELECT 'papers=' || count(*) FROM papers;"
+
+echo "Bringing up api + open-webui..."
+podman-compose -f docker/docker-compose.yaml -f docker/docker-compose.local-test.yaml \
+  --env VLLM_API_KEY="$VLLM_API_KEY" --env VLLM_EMBEDDING_DIM="$VLLM_EMBEDDING_DIM" \
+  up -d --build api open-webui
+
+echo "Waiting for api healthcheck..."
+for i in $(seq 1 30); do
+  status=$(podman inspect --format '{{.State.Health.Status}}' knightgpt-api 2>/dev/null || echo "starting")
+  [ "$status" = "healthy" ] && break
+  sleep 5
+done
+[ "$status" = "healthy" ] || { echo "api never became healthy"; podman logs knightgpt-api; exit 1; }
+
+echo "Real end-to-end check: a chat completion through the deployed stack"
+podman exec knightgpt-api curl -sS -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"What is the KEGG pathway for the citrate cycle?"}],"stream":false}'
+
+echo "PROOF TEST PASSED"
+```
+
+Submit it (requires `VLLM_API_KEY` and `VLLM_EMBEDDING_DIM` already
+exported in the submitting shell — `sbatch` does not read `.env` files):
+
+```bash
+export VLLM_API_KEY=$(grep '^VLLM_API_KEY=' .env | cut -d= -f2-)
+export VLLM_EMBEDDING_DIM=$(grep '^VLLM_EMBEDDING_DIM=' .env | cut -d= -f2-)
+sbatch --export=VLLM_API_KEY,VLLM_EMBEDDING_DIM slurm/podman_stack_proof_test.slurm
+squeue -u $USER
+```
+
+- [ ] **Step 4: Read the job's output, report the real result**
+
+```bash
+cat logs/proof-test-podman-stack_<jobid>.out
+```
+
+Expected: the row-count verification printing `qiita_studies=884`,
+`qiita_study_publications=887`, `paper_study_links=6`, `papers=3`, and a
+real JSON chat-completion response ending in `PROOF TEST PASSED`. Report
+the actual output verbatim in the task report — this is the load-bearing
+verification for the whole plan, not a step to summarize as "it worked."
+If any step fails, that's a real finding to fix (in the affected task's
+files) before considering this plan done, not something to route around
+by skipping this task.
+
+- [ ] **Step 5: Tear down cleanly**
+
+This ran on shared Cosmos scratch — don't leave containers, images, or
+test data behind:
+
+```bash
+export PATH="/cosmos/vast/scratch/l1joseph/knightgpt/podman-compose-venv/bin:$PATH"
+cd /cosmos/nfs/home/l1joseph/knightGPT/.worktrees/qiita-knightgpt-webui-deploy
+podman-compose -f docker/docker-compose.yaml -f docker/docker-compose.local-test.yaml down -v
+podman system prune -af
+rm -rf /cosmos/vast/scratch/l1joseph/knightgpt/podman-test-pgdata /cosmos/vast/scratch/l1joseph/knightgpt/podman-test-duckdb
+```
+
+Verify: `podman ps -a` shows nothing left, `du -sh /cosmos/vast/scratch/l1joseph/knightgpt/podman-test-*` fails (directories gone).
+
+- [ ] **Step 6: Commit the proof-test artifacts (not the scratch data)**
+
+```bash
+git add docker/docker-compose.local-test.yaml slurm/podman_stack_proof_test.slurm
+git commit -m "$(cat <<'EOF'
+test(deploy): add podman-based local proof test for the full stack
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QsSnPMFuWDkEciVJcgF37X
+EOF
+)"
+```
+
+---
+
 ## Post-plan note for whoever deploys on kl-remote
 
-Tasks 6-8 produce ready-to-deploy artifacts and, where possible, live
-verification against NRP directly — but **the full stack has never
-actually been run together** (no Docker exists in the environment this
-plan was executed from). The final real acceptance test is: on kl-remote,
-`docker compose --profile production up -d`, then confirm `/health` on
-the `api` container, load `knightgpt.knight-lab-dev.org` in a browser,
-send one real chat message, and confirm both the answer and a live
-tool-call indicator render in Open WebUI. This is explicitly out of this
-plan's execution scope (per the spec's own architecture — kl-remote is
-Dhruv's/the user's to deploy on, not this session's) but is the true
-Definition of Done for the feature this plan implements.
+Task 9 proves the full stack actually works end-to-end (real Postgres
+restore, real API, real chat completion) via rootless podman on Cosmos —
+substantially more than code-level and NRP-only checks alone. What it
+does NOT prove: kl-remote-specific behavior (real Docker there, its
+existing shared reverse proxy, the Cloudflare Tunnel routing, and Open
+WebUI's browser-rendered tool-call status, which needs an actual browser
+against the real subdomain). The final real acceptance test is still: on
+kl-remote, `docker compose --profile production up -d`, confirm
+`knightgpt.knight-lab-dev.org` loads, send one real chat message, and
+confirm both the answer and a live tool-call indicator render in Open
+WebUI. That step is explicitly out of this plan's execution scope (per
+the spec's own architecture — kl-remote is Dhruv's/the user's to deploy
+on, not this session's) but is the true Definition of Done for the
+feature this plan implements — Task 9 just makes that final step far
+more likely to go smoothly on the first try.
+
+Separately, worth flagging (not fixed by this plan — a real but distinct
+cleanup): `docker/docker-compose.yaml`'s `postgres` service hardcodes a
+volume host path (`/sdsc/scc/ddp478/l1joseph/knightgpt/pgdata`) that
+doesn't correspond to Cosmos, kl-remote, or anywhere else currently
+established in this project — whoever deploys on kl-remote will need to
+override or fix this path for wherever Postgres data should actually
+persist there, the same way Task 9's override file does for the local
+proof test.
