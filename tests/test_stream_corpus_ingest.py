@@ -27,6 +27,44 @@ def test_build_full_doi_list_empty_input():
 
 
 @pytest.mark.unit
+def test_clear_stale_downloads_deletes_leftover_pdf_for_remaining_doi(tmp_path):
+    """A DOI that isn't in Postgres yet but has a leftover PDF (from a
+    prior run that failed after downloading, e.g. a conversion failure)
+    must have that file cleared -- otherwise download_papers()'s own
+    file-existence "already downloaded" check skips it forever, even
+    though it was never actually ingested."""
+    from scripts.stream_corpus_ingest import clear_stale_downloads
+
+    stale_pdf = tmp_path / "10-1_x.pdf"
+    stale_pdf.write_bytes(b"leftover from a failed run")
+
+    deleted = clear_stale_downloads(["10.1/x"], tmp_path)
+
+    assert deleted == 1
+    assert not stale_pdf.exists()
+
+
+@pytest.mark.unit
+def test_clear_stale_downloads_leaves_unrelated_files_alone(tmp_path):
+    from scripts.stream_corpus_ingest import clear_stale_downloads
+
+    unrelated = tmp_path / "10-1_other-paper.pdf"
+    unrelated.write_bytes(b"a different DOI's file")
+
+    deleted = clear_stale_downloads(["10.1/x"], tmp_path)
+
+    assert deleted == 0
+    assert unrelated.exists()
+
+
+@pytest.mark.unit
+def test_clear_stale_downloads_handles_missing_directory(tmp_path):
+    from scripts.stream_corpus_ingest import clear_stale_downloads
+
+    assert clear_stale_downloads(["10.1/x"], tmp_path / "does-not-exist") == 0
+
+
+@pytest.mark.unit
 def test_process_one_paper_download_failed_deletes_partial_pdf(tmp_path):
     from scripts.stream_corpus_ingest import process_one_paper
 

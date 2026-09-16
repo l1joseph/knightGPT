@@ -63,6 +63,13 @@ def parse_doi_file(path: Path) -> list[str]:
     return unique
 
 
+def doi_to_safe_name(doi: str) -> str:
+    """Filesystem-safe stem for a DOI's downloaded PDF/markdown files
+    (e.g. "10.1234/x.y" -> "10-1234_x-y"). Shared with callers that need
+    to check or clean up a DOI's files on disk without re-downloading."""
+    return doi.replace("/", "_").replace(".", "-")
+
+
 def resolve_doi_unpaywall(doi: str, session) -> str | None:
     """Resolve DOI to open-access PDF URL via Unpaywall API."""
     url = f"https://api.unpaywall.org/v2/{doi}?email={UNPAYWALL_EMAIL}"
@@ -218,7 +225,7 @@ def download_papers(
         logger.info(f"[{i}/{len(dois)}] Processing DOI: {doi}")
 
         # Check if already downloaded
-        safe_name = doi.replace("/", "_").replace(".", "-")
+        safe_name = doi_to_safe_name(doi)
         pdf_path = download_dir / f"{safe_name}.pdf"
         existing = list(download_dir.glob(f"*{safe_name}*"))
         if existing:

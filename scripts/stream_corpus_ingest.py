@@ -25,7 +25,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.download_papers import download_papers, parse_doi_file
+from scripts.download_papers import doi_to_safe_name, download_papers, parse_doi_file
 from scripts.nrp_batch_ingest import (
     DEFAULT_PAPER_LISTS,
     _insert_batch,
@@ -61,6 +61,33 @@ async def fetch_already_ingested_dois(pool) -> set[str]:
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT doi FROM papers WHERE doi IS NOT NULL")
     return {row["doi"] for row in rows}
+
+
+def clear_stale_downloads(remaining_dois: list[str], raw_pdf_dir: Path) -> int:
+    """Delete any leftover PDF on disk for a DOI that isn't in Postgres yet.
+
+    process_one_paper() only deletes a paper's raw PDF after a CONFIRMED
+    successful insert, so a paper that failed at any later stage (PDF
+    conversion, chunking, embedding, insert) leaves its PDF behind on
+    purpose, meant to let a later run retry it without a fresh network
+    fetch. But download_papers()'s own "already downloaded" check only
+    looks at file existence, not Postgres -- without this, that leftover
+    PDF makes every future run skip the DOI forever, treating a failed
+    paper as if it were done. Since the DOI isn't in Postgres, its
+    leftover files are unambiguously stale: nothing this run will read
+    them, so clearing them first is always safe and forces a real retry.
+
+    Returns the number of files deleted.
+    """
+    if not raw_pdf_dir.exists():
+        return 0
+    deleted = 0
+    for doi in remaining_dois:
+        safe_name = doi_to_safe_name(doi)
+        for stale_file in raw_pdf_dir.glob(f"*{safe_name}*"):
+            stale_file.unlink()
+            deleted += 1
+    return deleted
 
 
 def write_stats_json(stats: dict, processed_dir: Path) -> None:
@@ -169,6 +196,13 @@ def main():
     if not remaining_dois:
         print("Nothing to do -- every DOI is already ingested.")
         return
+
+    cleared = clear_stale_downloads(remaining_dois, settings.ingestion.raw_pdf_dir)
+    if cleared:
+        logger.info(
+            f"Cleared {cleared} stale leftover PDF(s) from a prior failed run "
+            f"(DOI not yet in Postgres) so they're retried instead of skipped"
+        )
 
     remaining_doi_file = processed_dir / "stream_corpus_ingest_remaining_dois.txt"
     processed_dir.mkdir(parents=True, exist_ok=True)
