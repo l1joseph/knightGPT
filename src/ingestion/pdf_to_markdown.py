@@ -36,20 +36,30 @@ def convert_pdf_to_markdown(
     Returns:
         Dictionary with conversion results and metadata
     """
-    try:
-        from marker.converters.pdf import PdfConverter
-        from marker.config.parser import ConfigParser
-        from marker.output import save_output
-    except ImportError:
-        logger.error("marker-pdf not installed. Install with: pip install marker-pdf")
-        raise ImportError("marker-pdf is required for PDF conversion")
-
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+
+    try:
+        from marker.converters.pdf import PdfConverter
+        from marker.config.parser import ConfigParser
+        from marker.output import save_output
+    except ImportError as e:
+        # Not necessarily "not installed" -- a broken/mismatched dependency
+        # inside marker's own import chain (e.g. a transformers version
+        # marker doesn't support) raises ImportError here too, with a
+        # message that has nothing to do with marker-pdf itself. Either
+        # way, marker isn't usable right now, so fall back the same way
+        # the code below does for a runtime failure -- an import-time
+        # failure isn't meaningfully different from marker raising once
+        # converter.convert() actually runs, and PdfConverter/ConfigParser
+        # were never constructed so nothing below depends on this import
+        # having succeeded.
+        logger.error(f"marker-pdf unavailable ({e}), falling back to PyMuPDF4LLM")
+        return _fallback_pymupdf(pdf_path, output_dir)
 
     logger.info(f"Converting PDF: {pdf_path}")
 
