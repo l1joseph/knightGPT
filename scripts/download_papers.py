@@ -2,10 +2,19 @@
 """
 Download papers from a DOI list for KnightGPT ingestion.
 
-Resolves DOIs to PDFs via multiple strategies:
+Resolves DOIs to full text via multiple strategies:
 1. Unpaywall API (free, legal open-access PDFs)
-2. PubMed Central direct link
+2. PubMed Central full-text XML (via NCBI E-utilities)
 3. DOI redirect + page scraping (fallback)
+
+Strategy 2 fetches PMC's own full-text XML via efetch rather than
+scraping a PDF URL: NCBI retired the old PMC Open Access Web Service
+(oa.fcgi) in August 2026, and PMC's article "/pdf/" URLs now redirect
+through a JS-based viewer that serves HTML, not a raw PDF stream, so a
+plain PDF-URL fetch no longer works for PMC at all. efetch's full-text
+XML isn't universal either -- some publishers opt out of XML
+redistribution even for PMC-hosted articles -- but it recovers the
+genuinely open-access subset without needing PDF conversion at all.
 
 Usage:
     python scripts/download_papers.py --input data/paper_lists/initial_papers.txt
@@ -18,6 +27,7 @@ import json
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -74,8 +84,9 @@ def resolve_doi_unpaywall(doi: str, session) -> str | None:
     return None
 
 
-def resolve_doi_pmc(doi: str, session) -> str | None:
-    """Try to find a PMC PDF link for a DOI via NCBI ID converter."""
+def resolve_doi_pmc_id(doi: str, session) -> str | None:
+    """Look up a DOI's PMCID (e.g. "PMC1317376") via NCBI's ID converter,
+    or None if the DOI isn't in PMC at all."""
     url = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
     try:
         resp = session.get(
@@ -88,11 +99,65 @@ def resolve_doi_pmc(doi: str, session) -> str | None:
         data = resp.json()
         records = data.get("records", [])
         if records and records[0].get("pmcid"):
-            pmcid = records[0]["pmcid"]
-            return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
+            return records[0]["pmcid"]
     except Exception as e:
-        logger.debug(f"PMC lookup failed for {doi}: {e}")
+        logger.debug(f"PMC ID lookup failed for {doi}: {e}")
     return None
+
+
+def extract_pmc_body_text(root: ET.Element) -> str:
+    """Extract a plain-text-with-headings rendering of a PMC JATS XML
+    article's <body> -- section titles become "## " headings, paragraphs
+    are joined with blank lines. Returns "" if there's no <body> at all
+    (the article isn't in PMC's full-text set, or the publisher opted
+    out of XML redistribution for it -- PMC's efetch response still
+    returns 200 with article metadata in that case, just no body)."""
+    body = root.find(".//body")
+    if body is None:
+        return ""
+    parts = []
+    for el in body.iter():
+        if el.tag == "title":
+            text = "".join(el.itertext()).strip()
+            if text:
+                parts.append(f"## {text}")
+        elif el.tag == "p":
+            text = "".join(el.itertext()).strip()
+            if text:
+                parts.append(text)
+    return "\n\n".join(parts)
+
+
+def fetch_pmc_fulltext(pmcid: str, session) -> Optional[dict]:
+    """Fetch a PMC article's full-text XML via NCBI's E-utilities efetch
+    (the sanctioned replacement for the retired oa.fcgi service and for
+    scraping PMC's own JS-rendered article pages) and extract its body
+    text and title.
+
+    Returns {"text": str, "title": str} on success, or None if the
+    article has no extractable body (not everything in PMC permits full
+    XML redistribution) or the request itself fails.
+    """
+    numeric_id = pmcid[3:] if pmcid.upper().startswith("PMC") else pmcid
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    try:
+        resp = session.get(
+            url,
+            params={"db": "pmc", "id": numeric_id, "rettype": "full", "retmode": "xml"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return None
+        root = ET.fromstring(resp.content)
+        text = extract_pmc_body_text(root)
+        if not text:
+            return None
+        title_el = root.find(".//article-title")
+        title = "".join(title_el.itertext()).strip() if title_el is not None else ""
+        return {"text": text, "title": title}
+    except Exception as e:
+        logger.debug(f"PMC full-text fetch failed for {pmcid}: {e}")
+        return None
 
 
 def download_papers(
@@ -166,13 +231,28 @@ def download_papers(
         pdf_url = resolve_doi_unpaywall(doi, scraper.session)
         source = "unpaywall"
 
-        # Strategy 2: PMC
+        doc: Optional[ScrapedDocument] = None
+
+        # Strategy 2: PMC full-text XML (not a PDF fetch -- see module
+        # docstring for why the old PDF-URL approach no longer works here)
         if not pdf_url:
-            pdf_url = resolve_doi_pmc(doi, scraper.session)
-            source = "pmc"
+            pmcid = resolve_doi_pmc_id(doi, scraper.session)
+            if pmcid:
+                fulltext = fetch_pmc_fulltext(pmcid, scraper.session)
+                if fulltext:
+                    output_path = markdown_dir / f"{safe_name}.md"
+                    output_path.write_text(fulltext["text"], encoding="utf-8")
+                    doc = ScrapedDocument(
+                        url=f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/",
+                        title=fulltext["title"] or safe_name,
+                        content_type="application/xml",
+                        file_path=output_path,
+                        metadata={"pmcid": pmcid},
+                    )
+                    source = "pmc_fulltext_xml"
 
         # Strategy 3: DOI redirect + scrape
-        if not pdf_url:
+        if doc is None and not pdf_url:
             doi_url = f"https://doi.org/{doi}"
             try:
                 resp = scraper.session.get(doi_url, allow_redirects=True, timeout=15)
@@ -188,30 +268,30 @@ def download_papers(
             except Exception as e:
                 logger.debug(f"  DOI redirect scrape failed: {e}")
 
-        doc: Optional[ScrapedDocument] = None
-        if pdf_url:
+        if doc is None and pdf_url:
             logger.info(f"  Found PDF via {source}: {pdf_url}")
             doc = scraper._download_and_process(pdf_url, safe_name)
-            if doc:
-                doc.metadata["doi"] = doi
-                doc.metadata["source"] = source
-                stats["downloaded"] += 1
-                stats["details"].append(
-                    {"doi": doi, "status": "downloaded", "source": source}
-                )
-                logger.info(f"  Downloaded and converted: {doc.file_path}")
-            else:
-                stats["failed"] += 1
-                stats["details"].append(
-                    {"doi": doi, "status": "failed", "reason": "download_or_convert"}
-                )
-                logger.warning(f"  Download/convert failed")
+
+        if doc:
+            doc.metadata["doi"] = doi
+            doc.metadata["source"] = source
+            stats["downloaded"] += 1
+            stats["details"].append(
+                {"doi": doi, "status": "downloaded", "source": source}
+            )
+            logger.info(f"  Downloaded and converted: {doc.file_path}")
+        elif pdf_url:
+            stats["failed"] += 1
+            stats["details"].append(
+                {"doi": doi, "status": "failed", "reason": "download_or_convert"}
+            )
+            logger.warning(f"  Download/convert failed")
         else:
             stats["failed"] += 1
             stats["details"].append(
-                {"doi": doi, "status": "failed", "reason": "no_pdf_url"}
+                {"doi": doi, "status": "failed", "reason": "no_fulltext_found"}
             )
-            logger.warning(f"  Could not resolve PDF URL")
+            logger.warning(f"  Could not resolve full text")
 
         if on_paper_processed is not None:
             on_paper_processed(doi, doc, pdf_path)
