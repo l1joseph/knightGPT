@@ -141,3 +141,95 @@ async def test_insert_chunks_skips_chunks_without_embedding(tmp_path):
 
     assert stats["chunks_inserted"] == 0
     conn.execute.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_insert_chunks_skips_chunk_with_null_inside_embedding_vector(tmp_path):
+    """A non-empty vector with a NULL inside it (seen live from the NRP
+    embedding endpoint for a small fraction of chunks) passes the
+    `if not chunk.embedding` truthiness check but makes DuckDB's
+    array_cosine_distance raise during neighbor search if it ever reaches
+    phase 3. Must be filtered out up front, same as having no embedding
+    at all -- confirmed live (job 101550): before this fix, one such
+    chunk's uncaught DuckDB error killed edge-building for the rest of
+    that whole batch, even though every other chunk's text/embedding was
+    already safely committed."""
+    from src.graph.postgres_builder import insert_chunks
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    good = Chunk(
+        id="good1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0]
+    )
+    bad = Chunk(
+        id="bad1", text="world", source_file="p.md", embedding=[1.0, None, 0.0, 0.0]
+    )
+    papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
+
+    pool, conn = make_mock_pool()
+
+    stats = await insert_chunks(
+        pool, [good, bad], papers, store, similarity_threshold=0.7
+    )
+
+    assert stats["chunks_inserted"] == 1
+    stored = store.get_embeddings(["good1", "bad1"])
+    store.close()
+    assert "good1" in stored
+    assert "bad1" not in stored
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_insert_chunks_isolates_phase3_failure_to_one_chunk(tmp_path):
+    """Phases 1-2 (Postgres rows + DuckDB embeddings) already committed
+    for every chunk by the time phase 3 (neighbor search + edges) runs --
+    one chunk's search failing there must not prevent the rest of the
+    batch's edges from being built, or graph.build() from being called.
+    Confirmed live (job 101550): before this fix, an uncaught phase-3
+    exception for one chunk aborted the whole loop, silently leaving
+    every later chunk in that batch edge-less."""
+    from src.graph.postgres_builder import insert_chunks
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings([("existing1", [1.0, 0.0, 0.0, 0.0])])
+    store.ensure_index()
+
+    ok_chunk = Chunk(
+        id="ok1", text="hello", source_file="p.md", embedding=[0.99, 0.01, 0.0, 0.0]
+    )
+    papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
+
+    pool, conn = make_mock_pool()
+
+    original_search = store.search
+    call_count = {"n": 0}
+
+    def flaky_search(embedding, top_k):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise Exception("simulated array_cosine_distance NULL failure")
+        return original_search(embedding, top_k)
+
+    store.search = flaky_search
+
+    # Two chunks: the first hits the simulated phase-3 failure, the
+    # second must still get its edges built afterward.
+    ok_chunk_2 = Chunk(
+        id="ok2", text="hello2", source_file="p.md", embedding=[0.98, 0.02, 0.0, 0.0]
+    )
+
+    stats = await insert_chunks(
+        pool, [ok_chunk, ok_chunk_2], papers, store, similarity_threshold=0.7
+    )
+    store.close()
+
+    # Both chunks' Postgres/DuckDB rows exist regardless of the phase-3 failure.
+    assert stats["chunks_inserted"] == 2
+    # Only the second chunk (unaffected by the simulated failure) got edges.
+    assert stats["edges_inserted"] >= 1
+    # graph.build() still gets called despite the phase-3 exception.
+    build_calls = [
+        call for call in conn.execute.call_args_list if "graph.build" in call.args[0]
+    ]
+    assert len(build_calls) == 1

@@ -70,6 +70,22 @@ async def insert_chunks(
         if not chunk.embedding:
             logger.warning(f"Chunk {chunk.id} has no embedding, skipping")
             continue
+        if any(v is None for v in chunk.embedding):
+            # A non-empty vector with a NULL inside it (seen live from the
+            # NRP embedding endpoint for a small fraction of chunks) passes
+            # the truthiness check above but makes DuckDB's
+            # array_cosine_distance raise "left argument can not contain
+            # NULL values" during phase 3's neighbor search below -- which,
+            # uncaught, aborted edge-building for the rest of the batch too,
+            # not just this chunk (confirmed live: job 101550, 113 papers
+            # whose text/embeddings were already committed in phases 1-2
+            # still got reported as failed because one bad chunk's search
+            # killed phase 3 partway through). Treat it the same as no
+            # embedding at all rather than letting it reach DuckDB.
+            logger.warning(
+                f"Chunk {chunk.id} has a NULL value inside its embedding vector, skipping"
+            )
+            continue
         embeddable_chunks.append(chunk)
 
     if not embeddable_chunks:
@@ -129,31 +145,46 @@ async def insert_chunks(
         await asyncio.to_thread(duckdb_store.ensure_index)
 
         # Phase 3: neighbor search + edges, now that every inserted chunk's
-        # embedding is queryable in DuckDB.
+        # embedding is queryable in DuckDB. Each chunk is isolated in its
+        # own try/except -- by this point phases 1-2 already committed
+        # every chunk's Postgres row and DuckDB embedding, so one chunk's
+        # search/insert failing here must not abort edge-building for the
+        # rest of the batch too (confirmed live: an uncaught DuckDB error
+        # for a single chunk previously killed this whole loop, silently
+        # leaving every later chunk in the batch edge-less even though
+        # their text and embeddings were already safely stored -- see the
+        # embeddable_chunks filtering above for the specific NULL-vector
+        # case that triggered this).
         for chunk in inserted_chunks:
-            neighbors = await asyncio.to_thread(
-                duckdb_store.search, chunk.embedding, top_k=max_neighbors + 1
-            )
+            try:
+                neighbors = await asyncio.to_thread(
+                    duckdb_store.search, chunk.embedding, top_k=max_neighbors + 1
+                )
 
-            # The neighbor search can return the chunk itself (distance 0 /
-            # similarity 1.0); exclude it before capping.
-            edges = [
-                (chunk.id, neighbor_id, similarity)
-                for neighbor_id, similarity in neighbors
-                if neighbor_id != chunk.id and similarity >= similarity_threshold
-            ][:max_neighbors]
+                # The neighbor search can return the chunk itself (distance
+                # 0 / similarity 1.0); exclude it before capping.
+                edges = [
+                    (chunk.id, neighbor_id, similarity)
+                    for neighbor_id, similarity in neighbors
+                    if neighbor_id != chunk.id and similarity >= similarity_threshold
+                ][:max_neighbors]
 
-            if edges:
-                async with conn.transaction():
-                    await conn.executemany(
-                        """
-                        INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
-                        VALUES ($1, $2, $3)
-                        ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
-                        """,
-                        edges,
-                    )
-                    stats["edges_inserted"] += len(edges)
+                if edges:
+                    async with conn.transaction():
+                        await conn.executemany(
+                            """
+                            INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
+                            """,
+                            edges,
+                        )
+                        stats["edges_inserted"] += len(edges)
+            except Exception:
+                logger.exception(
+                    f"Chunk {chunk.id}: neighbor search/edge insert failed -- "
+                    "chunk stays searchable (already in Postgres+DuckDB) but edge-less"
+                )
 
         await conn.execute("SELECT * FROM graph.build()")
 
