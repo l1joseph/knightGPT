@@ -61,7 +61,7 @@ class HybridRetriever(BaseRetriever):
     ):
         self.dsn = dsn or settings.postgres.dsn
         self.duckdb_store = duckdb_store or DuckDBStore(
-            str(settings.ingestion.duckdb_path)
+            str(settings.ingestion.duckdb_path), dim=settings.vllm.embedding_dim
         )
         self.embedder = embedder or VLLMEmbedder()
         self.top_k = top_k

@@ -306,3 +306,140 @@ NRP storage. If full parity with the old Cosmos corpus matters for a future use 
 the MCP server), these 6 would need to be sourced separately (e.g. copied from Cosmos
 scratch and ingested directly) rather than assumed already covered. This is a known,
 accepted gap as of the current run, not an open bug to chase.
+
+## Embedding dimension discovery (kl-remote deploy)
+
+`docker/docker-compose.yaml`'s `api` service requires `VLLM_EMBEDDING_DIM` with **no
+default** — `${VLLM_EMBEDDING_DIM:?VLLM_EMBEDDING_DIM must be set explicitly ...}` — so a
+missing value fails the container at startup instead of silently ingesting with the wrong
+vector width. Don't assume this value; discover it with a live call against NRP's endpoint,
+since it's the actual output size of whatever model `qwen3-embedding` currently resolves to,
+not a documented constant:
+
+```bash
+~/miniforge3/envs/knightGPT/bin/python -c "
+from openai import OpenAI
+import os
+client = OpenAI(api_key=os.environ['VLLM_API_KEY'], base_url='https://ellm.nrp-nautilus.io/v1')
+resp = client.embeddings.create(model='qwen3-embedding', input='test')
+print('DIMENSION:', len(resp.data[0].embedding))
+"
+```
+
+Confirmed on 2026-09-14 from Cosmos (`VLLM_API_KEY` sourced from this worktree's `.env`):
+**`DIMENSION: 4096`**. Set `VLLM_EMBEDDING_DIM=4096` in kl-remote's `.env` (see
+`.env.example`) before the first `docker compose up`. If `qwen3-embedding` is ever
+repointed at a different underlying model, re-run this exact call and update both
+`.env.example`'s comment and kl-remote's `.env` — don't carry the old value forward.
+
+## Known issue: `docker-compose.yaml`'s postgres volume path needs overriding before deploy
+
+`docker/docker-compose.yaml`'s `postgres` service hardcodes a pgdata host
+volume path, `/sdsc/scc/ddp478/l1joseph/knightgpt/pgdata`, that does not
+correspond to Cosmos, kl-remote, or anywhere else currently reachable from
+this repo's own tooling -- it's stale from an earlier environment. Whoever
+deploys on kl-remote needs to override or fix this path to wherever
+Postgres data should actually persist there (a Compose override file,
+matching the pattern the now-removed `docker/docker-compose.local-test.yaml`
+used for the Cosmos singularity proof test, is the standard way to do this
+without editing the base file) **before** the first `docker compose up
+postgres` -- an unwritable or unintended path here fails silently into
+whatever Docker's default anonymous-volume behavior does for a bad host
+path, not with an obvious error. This was flagged during the Cosmos
+singularity proof test (`slurm/singularity_stack_proof_test.slurm`, Task 9)
+but is a real, pre-existing gap in the base compose file, not something
+introduced by or specific to that proof test.
+
+The `postgres` service's other volume line has the identical problem for a
+different path: `docker/docker-compose.yaml:89` mounts
+`/cosmos/vast/scratch/l1joseph/knightgpt/deploy/knightgpt-postgres-20260904-024751.dump`
+-- a Cosmos-only absolute path that does not exist on kl-remote either.
+Docker silently bind-mounts an empty directory over a nonexistent host path,
+so `pg_restore` fails there with a directory-not-a-file error rather than a
+clear "file not found." Fetch the actual dump from its S3 backup location
+first, then override the mount path (the same Compose-override mechanism as
+the pgdata path above) to wherever it lands on kl-remote:
+
+```bash
+mkdir -p /path/on/kl-remote/knightgpt-deploy
+rclone copy nrp-s3:l1joseph-evo2-test/knightgpt-postgres-backup/20260904-024751/knightgpt-postgres-20260904-024751.dump \
+    /path/on/kl-remote/knightgpt-deploy/
+```
+
+(same command as the plan's own Step 1 for fetching this backup, just
+pointed at a kl-remote path instead of Cosmos scratch).
+
+## Re-ingestion after a kl-remote Postgres restore (one-time deploy step)
+
+This step is **not executable from Cosmos** — it requires a real, reachable Postgres, which
+only exists once the `docker/docker-compose.yaml` stack (Task 7) is actually running on
+kl-remote. It is written up here as an exact runbook for whoever performs that deploy, not
+run as part of this task.
+
+After `docker compose up -d postgres` completes its first boot (restore from the Qiita S3
+backup + `TRUNCATE papers, chunks, chunk_edges`, per Task 7's init script) and **before**
+starting the `api`/`open-webui` containers:
+
+1. Confirm `VLLM_EMBEDDING_DIM` is set correctly in kl-remote's `.env` per the discovery
+   step above — do not skip this even if it "worked before"; re-verify against a live call
+   if there's any doubt the endpoint's model has changed.
+2. Run the same local ingestion logic already exercised during the 2026-08-28 demo,
+   pointed at kl-remote's Postgres (reachable directly at
+   `postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt` since this Postgres
+   runs locally on kl-remote — no port-forward needed, unlike the NRP in-cluster DSN
+   documented above) and the NRP embedding endpoint:
+
+   ```bash
+   POSTGRES_DSN="postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt" \
+   VLLM_EMBEDDING_URL="https://ellm.nrp-nautilus.io/v1" \
+   VLLM_API_KEY="$VLLM_API_KEY" \
+   VLLM_EMBEDDING_MODEL="qwen3-embedding" \
+   ~/miniforge3/envs/knightGPT/bin/python -c "
+   from scripts.nrp_batch_ingest import run_batch_ingestion
+   from pathlib import Path
+   run_batch_ingestion(paper_lists=[Path('data/paper_lists/initial_papers.txt')], max_papers=3)
+   "
+   ```
+
+   **This does not precisely scope ingestion to 3 specific DOIs from
+   `initial_papers.txt`, and it did not during the 2026-08-28 demo either — know this going
+   in, don't be surprised by it:**
+   - `run_batch_ingestion()` unconditionally appends the derived long-read DOI list to
+     whatever `paper_lists` you pass (`all_lists = list(paper_lists) +
+     [ensure_longread_dois_derived()]`, `scripts/nrp_batch_ingest.py` ~line 208), so Phase 1
+     will also attempt to download those long-read papers. In the 2026-08-28 demo these
+     downloads mostly failed locally due to a missing `marker-pdf` dependency — a known,
+     harmless side effect that does not block the 3-paper result. Expect the same failures
+     here and ignore them unless *all* downloads fail.
+   - Phase 2 does not select markdown files per-list — it takes
+     `sorted(markdown_dir.rglob("*.md"))[:max_papers]` across the **entire shared markdown
+     directory**, not filtered by which list a paper's DOI came from. So `max_papers=3`
+     ingests whichever 3 files sort first alphabetically among everything already converted
+     to markdown in that directory — not guaranteed to be `initial_papers.txt`'s first 3
+     DOIs, or even DOIs from `initial_papers.txt` at all if other papers' markdown already
+     exists there. This is exactly what happened on 2026-08-28: the operator targeted 3
+     specific DOIs and got 3 *different*, but still real, papers instead — and the demo
+     still succeeded, because verification only needs 3 real papers with real chunks, not
+     specific ones.
+   - Bottom line: treat this command as producing "some small number (≤3) of real,
+     fully-ingested papers for verification," not as a precise, reproducible selection of
+     `initial_papers.txt`'s first 3 DOIs. If exact DOI selection ever matters for a future
+     use of this script, that would require a code change to `nrp_batch_ingest.py`
+     (out of scope here — that script is pre-existing and untouched by this task).
+
+3. Verify afterward (live-verification, matching the design spec's Testing section
+   convention of live-verifying real infra rather than unit-testing it). Because of the
+   scoping caveat above, verify counts and content quality, not which specific papers
+   landed:
+   - `SELECT count(*) FROM papers;` → `3` (or fewer, if `max_papers` files include papers
+     already present from a prior run — see the caveat above; a lower count here is a
+     signal to check what actually got ingested, not necessarily a failure)
+   - `SELECT count(*) FROM chunks;` → `> 0`
+   - `SELECT count(*) FROM chunk_edges;` → `> 0`
+   - Spot-check one row, e.g. `SELECT text FROM chunks LIMIT 1;`, and confirm it has
+     real, non-null, non-empty text — not just a non-zero row count.
+
+Only once all four checks pass should `api`/`open-webui` be started
+(`docker compose up -d api open-webui`) — starting them against an empty or
+partially-ingested corpus would make the RAG pipeline silently return nothing useful rather
+than fail loudly.

@@ -106,7 +106,10 @@ def run_pipeline(
                 # create and use the pool inside the same asyncio.run() call
                 # rather than across separate ones.
                 pool = await get_pg_pool()
-                store = DuckDBStore(str(settings.ingestion.duckdb_path))
+                store = DuckDBStore(
+                    str(settings.ingestion.duckdb_path),
+                    dim=settings.vllm.embedding_dim,
+                )
                 try:
                     return await insert_chunks(
                         pool,

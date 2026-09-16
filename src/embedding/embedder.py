@@ -46,23 +46,24 @@ class VLLMEmbedder:
         self,
         api_base: Optional[str] = None,
         model: Optional[str] = None,
-        api_key: str = "EMPTY",
+        api_key: Optional[str] = None,
         batch_size: int = 32,
         timeout: float = 60.0,
     ):
         """
         Initialize embedder.
-        
+
         Args:
             api_base: vLLM server URL (default from settings)
             model: Embedding model name
-            api_key: API key (vLLM typically uses "EMPTY")
+            api_key: API key (default from settings; self-hosted vLLM uses
+                "EMPTY", NRP's hosted endpoint needs a real token)
             batch_size: Batch size for embedding generation
             timeout: Request timeout in seconds
         """
         self.api_base = api_base or settings.vllm.embedding_url
         self.model = model or settings.vllm.embedding_model
-        self.api_key = api_key
+        self.api_key = api_key or settings.vllm.api_key
         self.batch_size = batch_size
         self.timeout = timeout
         

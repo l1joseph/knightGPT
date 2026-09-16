@@ -1,6 +1,7 @@
 """FastAPI application for KnightGPT RAG API."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -9,7 +10,9 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
+from ..agents import AgentOrchestrator
 from ..embedding import VLLMEmbedder
 from ..graph import insert_chunks, DuckDBStore
 from ..ingestion import (
@@ -29,12 +32,13 @@ _pool = None
 _retriever: Optional[HybridRetriever] = None
 _rag_engine: Optional[RAGEngine] = None
 _duckdb_store: Optional[DuckDBStore] = None
+_orchestrator: Optional[AgentOrchestrator] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global _pool, _retriever, _rag_engine, _duckdb_store
+    global _pool, _retriever, _rag_engine, _duckdb_store, _orchestrator
 
     # _pool backs the /api/v1/ingest background task's insert_chunks() calls
     # (always awaited from this loop). _duckdb_store is the embedded vector
@@ -47,10 +51,18 @@ async def lifespan(app: FastAPI):
     # support.
     _pool = await get_pg_pool()
     logger.info(f"DuckDB store: {settings.ingestion.duckdb_path.resolve()}")
-    _duckdb_store = DuckDBStore(str(settings.ingestion.duckdb_path))
+    _duckdb_store = DuckDBStore(
+        str(settings.ingestion.duckdb_path), dim=settings.vllm.embedding_dim
+    )
     _retriever = HybridRetriever(duckdb_store=_duckdb_store)
     _rag_engine = RAGEngine(retriever=_retriever)
     logger.info("RAG engine initialized (Postgres+DuckDB-backed)")
+    # Built once here (owns an OpenAI client + its own httpx connection pool
+    # to the NRP endpoint) rather than per-request, so /v1/chat/completions
+    # and /api/v1/agent/chat -- the actual hot paths for Open WebUI traffic
+    # -- reuse one keep-alive connection instead of paying fresh TLS/TCP
+    # setup on every call.
+    _orchestrator = AgentOrchestrator(retriever=_retriever)
 
     yield
 
@@ -139,6 +151,7 @@ class HealthResponse(BaseModel):
     status: str
     embedding_server: bool
     inference_server: bool
+    postgres: bool
     chunks_loaded: int
     graph_nodes: int
     chunk_embeddings_count: int
@@ -164,6 +177,16 @@ def get_retriever() -> HybridRetriever:
     return _retriever
 
 
+def get_orchestrator() -> AgentOrchestrator:
+    """Dependency for the shared agent orchestrator."""
+    if _orchestrator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent orchestrator not initialized. No data loaded.",
+        )
+    return _orchestrator
+
+
 # Routes
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -181,7 +204,7 @@ async def health_check():
         from openai import OpenAI
 
         client = OpenAI(
-            api_key="EMPTY",
+            api_key=settings.vllm.api_key,
             base_url=settings.vllm.inference_url,
         )
         # Quick health check
@@ -192,11 +215,47 @@ async def health_check():
 
     chunks_count = 0
     graph_nodes = 0
+    postgres_healthy = False
     if _pool is not None:
+        # chunks-count and graph.status() are checked as two independent
+        # try/except blocks over one shared connection -- not one try/except
+        # around both -- so a total Postgres outage stays distinguishable
+        # from "just no graph data yet". An earlier version wrapped both
+        # queries in a single try/except, which meant a total Postgres
+        # outage silently reported chunks_loaded=0 and (since `status` only
+        # ever considered embedding/inference health) status="healthy" over
+        # a dead database. postgres_healthy below makes a real outage
+        # visible instead.
         async with _pool.acquire() as conn:
-            chunks_count = await conn.fetchval("SELECT count(*) FROM chunks")
-            graph_status = await conn.fetchrow("SELECT node_count FROM graph.status()")
-            graph_nodes = graph_status["node_count"] if graph_status else 0
+            try:
+                chunks_count = await conn.fetchval("SELECT count(*) FROM chunks")
+                postgres_healthy = True
+            except Exception as e:
+                logger.error(f"Postgres health check failed: {e}")
+
+            if postgres_healthy:
+                try:
+                    # graph.status() raises "registered table relation no
+                    # longer exists" (pgGraph diagnostic PG000) when
+                    # pgGraph's registration tables reference stale
+                    # pre-restore OIDs: pg_restore assigns brand-new OIDs
+                    # to the recreated chunks/chunk_edges tables, but the
+                    # restored graph._registered_tables/_registered_edges
+                    # rows still point at the OLD ones. See
+                    # docker/postgres/init/02-restore-backup.sh (which now
+                    # re-applies sql/schema.sql + graph.build() after
+                    # restore specifically to fix this) and
+                    # k8s/nrp/RESTORE.md for the full mechanism. Caught
+                    # narrowly here -- not the whole Postgres block above
+                    # -- so only a genuine graph-status issue degrades
+                    # gracefully; a real Postgres outage is still visible
+                    # via postgres_healthy.
+                    graph_status = await conn.fetchrow(
+                        "SELECT node_count FROM graph.status()"
+                    )
+                    graph_nodes = graph_status["node_count"] if graph_status else 0
+                except Exception as e:
+                    logger.error(f"Graph status check failed: {e}")
 
     chunk_embeddings_count = 0
     if _duckdb_store is not None:
@@ -206,12 +265,17 @@ async def health_check():
         # call is serialized behind DuckDBStore's internal lock.
         chunk_embeddings_count = await asyncio.to_thread(_duckdb_store.count)
 
-    status = "healthy" if embedding_healthy and inference_healthy else "degraded"
+    status = (
+        "healthy"
+        if embedding_healthy and inference_healthy and postgres_healthy
+        else "degraded"
+    )
 
     return HealthResponse(
         status=status,
         embedding_server=embedding_healthy,
         inference_server=inference_healthy,
+        postgres=postgres_healthy,
         chunks_loaded=chunks_count,
         graph_nodes=graph_nodes,
         chunk_embeddings_count=chunk_embeddings_count,
@@ -536,26 +600,23 @@ async def agent_chat(request: AgentChatRequest):
     """
     Multi-agent RAG chat with tool use.
 
-    Uses a 4-stage pipeline (plan → execute → verify → generate)
-    with access to PubMed, OpenAlex, KEGG, and QIIME2 tools.
+    Runs a real OpenAI-style function-calling loop, giving the model
+    access to PubMed, OpenAlex, KEGG, and QIIME2 tools, until it returns
+    a final answer or the tool-round safety cap is hit.
     """
-    from ..agents import AgentOrchestrator
+    orchestrator = get_orchestrator()
 
-    orchestrator = AgentOrchestrator(
-        retriever=_retriever,
-        rag_engine=_rag_engine,
+    # orchestrator.run() makes blocking OpenAI client calls and can loop up
+    # to max_tool_rounds sequential round-trips -- offloaded to a worker
+    # thread so it doesn't stall the event loop for every other concurrent
+    # request, matching how /v1/chat/completions already handles this.
+    result = await run_in_threadpool(
+        orchestrator.run, request.message, top_k=request.top_k
     )
-
-    result = orchestrator.run(request.message, top_k=request.top_k)
 
     return {
         "answer": result.final_answer,
-        "plan": {
-            "tools_used": result.plan.tools_to_use if result.plan else [],
-            "sub_queries": result.plan.sub_queries if result.plan else [],
-            "reasoning": result.plan.reasoning if result.plan else "",
-        },
-        "citations": result.verified_citations[:10],
+        "tools_used": list(dict.fromkeys(r.tool_name for r in result.tool_results)),
         "tool_results_count": len(result.tool_results),
     }
 
@@ -592,20 +653,22 @@ async def list_models():
 
 
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(
-    request: Request,
-    rag_engine: RAGEngine = Depends(get_rag_engine),
-):
+async def openai_chat_completions(request: Request):
     """
-    OpenAI-compatible chat completions endpoint.
+    OpenAI-compatible chat completions endpoint, backed by the real
+    multi-tool agent loop (not plain RAG) -- see
+    docs/superpowers/specs/2026-09-14-knightgpt-webui-deploy-design.md.
+    """
+    import uuid
 
-    For integration with Open WebUI and other OpenAI-compatible clients.
-    """
+    from .sse_adapter import event_to_sse_chunks
+
     data = await request.json()
     messages = data.get("messages", [])
     stream = data.get("stream", False)
+    temperature = data.get("temperature", 0.3)
+    max_tokens = data.get("max_tokens", 2000)
 
-    # Get the last user message
     user_message = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -615,74 +678,67 @@ async def openai_chat_completions(
     if not user_message:
         raise HTTPException(status_code=400, detail="No user message found")
 
+    chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    orchestrator = get_orchestrator()
+
     if stream:
 
         async def generate():
-            async for token in rag_engine.query_stream(
-                question=user_message,
-                top_k=5,
-                max_tokens=data.get("max_tokens", 1024),
-                temperature=data.get("temperature", 0.7),
-            ):
-                chunk = {
-                    "id": "chatcmpl-knightgpt",
-                    "object": "chat.completion.chunk",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": token},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {__import__('json').dumps(chunk)}\n\n"
+            import queue as sync_queue
 
-            # Final chunk
-            final_chunk = {
-                "id": "chatcmpl-knightgpt",
-                "object": "chat.completion.chunk",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-            yield f"data: {__import__('json').dumps(final_chunk)}\n\n"
+            event_queue: sync_queue.Queue = sync_queue.Queue()
+            SENTINEL = object()
+
+            def on_event(event: dict) -> None:
+                event_queue.put(event)
+
+            def run_orchestrator() -> None:
+                try:
+                    orchestrator.run(
+                        user_message,
+                        on_event=on_event,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                finally:
+                    event_queue.put(SENTINEL)
+
+            loop = asyncio.get_event_loop()
+            future = loop.run_in_executor(None, run_orchestrator)
+
+            while True:
+                event = await run_in_threadpool(event_queue.get)
+                if event is SENTINEL:
+                    break
+                for chunk in event_to_sse_chunks(event, chat_id):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+
+            await future
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(
-            generate(),
-            media_type="text/event-stream",
-        )
+        return StreamingResponse(generate(), media_type="text/event-stream")
 
-    # Non-streaming
-    response = await rag_engine.query_async(
-        question=user_message,
-        top_k=5,
-        max_tokens=data.get("max_tokens", 1024),
-        temperature=data.get("temperature", 0.7),
+    # Non-streaming: run the loop, collect events, build one response.
+    events: list[dict] = []
+    ctx = await run_in_threadpool(
+        orchestrator.run,
+        user_message,
+        on_event=events.append,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
     return {
-        "id": "chatcmpl-knightgpt",
+        "id": chat_id,
         "object": "chat.completion",
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": response.answer,
-                },
+                "message": {"role": "assistant", "content": ctx.final_answer},
                 "finish_reason": "stop",
             }
         ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 

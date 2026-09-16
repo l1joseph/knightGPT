@@ -23,6 +23,14 @@ class VLLMSettings(BaseSettings):
         default=32,
         description="Batch size for embedding generation",
     )
+    api_key: str = Field(
+        default="EMPTY",
+        description="API key for the OpenAI-compatible endpoint (self-hosted vLLM uses 'EMPTY'; NRP's hosted endpoint needs a real token)",
+    )
+    embedding_dim: int = Field(
+        default=3584,
+        description="Embedding vector dimension — must match the actual output size of embedding_model, or DuckDBStore's dimension guard raises at construction",
+    )
 
     # Inference server
     inference_url: str = Field(

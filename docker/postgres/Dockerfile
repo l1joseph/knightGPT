@@ -38,6 +38,13 @@ COPY --from=pggraph-builder /src/pggraph/graph/target/release/graph-pg${PG_MAJOR
     /usr/lib/postgresql/${PG_MAJOR}/lib/
 
 ENV POSTGRES_DB=knightgpt
-COPY docker/postgres/init/01-create-extensions.sql /docker-entrypoint-initdb.d/
+COPY docker/postgres/init/ /docker-entrypoint-initdb.d/
+# Needed by 02-restore-backup.sh to re-run pgGraph's table/edge
+# registration after pg_restore -- see that script's comments and
+# k8s/nrp/RESTORE.md ("The risk: stale OIDs in pgGraph's registration
+# tables") for why. Copied outside /docker-entrypoint-initdb.d/ so
+# Postgres's own directory scan doesn't also try to run it independently
+# (it ends in .sql and would otherwise be picked up a second time).
+COPY sql/schema.sql /opt/knightgpt/schema.sql
 
 CMD ["postgres", "-c", "shared_preload_libraries=graph"]

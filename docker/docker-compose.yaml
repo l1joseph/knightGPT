@@ -17,10 +17,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - VLLM_EMBEDDING_URL=${VLLM_EMBEDDING_URL:-http://host.docker.internal:8001/v1}
-      - VLLM_INFERENCE_URL=${VLLM_INFERENCE_URL:-http://host.docker.internal:8000/v1}
-      - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL:-Alibaba-NLP/gte-Qwen2-7B-instruct}
-      - VLLM_INFERENCE_MODEL=${VLLM_INFERENCE_MODEL:-meta-llama/Llama-3.3-70B-Instruct}
+      - VLLM_EMBEDDING_URL=${VLLM_EMBEDDING_URL:-https://ellm.nrp-nautilus.io/v1}
+      - VLLM_INFERENCE_URL=${VLLM_INFERENCE_URL:-https://ellm.nrp-nautilus.io/v1}
+      - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL:-qwen3-embedding}
+      - VLLM_INFERENCE_MODEL=${VLLM_INFERENCE_MODEL:-qwen3}
+      - VLLM_API_KEY=${VLLM_API_KEY:?VLLM_API_KEY must be set explicitly -- get an NRP LLM API token at https://ellm.nrp-nautilus.io/llmtoken and set it in kl-remote's .env before first deploy}
+      - VLLM_EMBEDDING_DIM=${VLLM_EMBEDDING_DIM:?VLLM_EMBEDDING_DIM must be set explicitly -- see k8s/nrp/README.md "Embedding dimension discovery (kl-remote deploy)" and set it in kl-remote's .env before first deploy}
       - POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD:-password}@postgres:5432/knightgpt
       # DuckDB opens this file read-write (embedded, in-process vector
       # store -- see src/graph/duckdb_store.py) and cannot live under the
@@ -84,6 +86,7 @@ services:
       - POSTGRES_DB=knightgpt
     volumes:
       - /sdsc/scc/ddp478/l1joseph/knightgpt/pgdata:/var/lib/postgresql/data
+      - /cosmos/vast/scratch/l1joseph/knightgpt/deploy/knightgpt-postgres-20260904-024751.dump:/docker-entrypoint-initdb.d/backup.dump:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres", "-d", "knightgpt"]
       interval: 10s
