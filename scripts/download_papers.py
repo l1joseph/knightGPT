@@ -19,6 +19,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -98,6 +99,9 @@ def download_papers(
     doi_file: Path,
     output_dir: Path | None = None,
     delay: float = 1.5,
+    on_paper_processed: Optional[
+        Callable[[str, Optional[ScrapedDocument], Path], None]
+    ] = None,
 ) -> dict:
     """
     Download papers from DOI list.
@@ -106,6 +110,17 @@ def download_papers(
         doi_file: Path to DOI list file
         output_dir: Where to save downloaded PDFs
         delay: Seconds between requests (be polite)
+        on_paper_processed: optional callback invoked once per DOI after
+            this function's own download+convert attempt, as
+            (doi, doc_or_None, expected_pdf_path). doc is the converted
+            ScrapedDocument on success (doc.file_path is the markdown
+            output), or None on failure (in which case a partial PDF may
+            still exist at expected_pdf_path). Never called for a DOI this
+            function skips as already-downloaded. Lets a caller stream
+            each paper straight into further processing (e.g. chunk ->
+            embed -> insert) and clean up the raw PDF/markdown immediately,
+            instead of keeping every paper's files on disk until the whole
+            DOI list finishes.
 
     Returns:
         Stats dict with counts and details
@@ -139,6 +154,7 @@ def download_papers(
 
         # Check if already downloaded
         safe_name = doi.replace("/", "_").replace(".", "-")
+        pdf_path = download_dir / f"{safe_name}.pdf"
         existing = list(download_dir.glob(f"*{safe_name}*"))
         if existing:
             logger.info(f"  Already downloaded: {existing[0].name}")
@@ -172,6 +188,7 @@ def download_papers(
             except Exception as e:
                 logger.debug(f"  DOI redirect scrape failed: {e}")
 
+        doc: Optional[ScrapedDocument] = None
         if pdf_url:
             logger.info(f"  Found PDF via {source}: {pdf_url}")
             doc = scraper._download_and_process(pdf_url, safe_name)
@@ -195,6 +212,9 @@ def download_papers(
                 {"doi": doi, "status": "failed", "reason": "no_pdf_url"}
             )
             logger.warning(f"  Could not resolve PDF URL")
+
+        if on_paper_processed is not None:
+            on_paper_processed(doi, doc, pdf_path)
 
         # Rate limiting
         time.sleep(delay)
