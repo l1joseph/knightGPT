@@ -46,6 +46,7 @@ data/processed/*.graphml
 data/processed/*.duckdb
 data/processed/*.duckdb.wal
 data/paper_lists/*.tsv
+data/paper_lists/longread_papers.txt
 
 # Misc
 core/

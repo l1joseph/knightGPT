@@ -44,6 +44,7 @@ DEFAULT_PAPER_LISTS = [
     Path("data/paper_lists/initial_papers.txt"),
     Path("data/paper_lists/zotero_papers.txt"),
     Path("data/paper_lists/mmc_papers.txt"),
+    Path("data/paper_lists/qiita_linked_papers.txt"),
 ]
 LONGREAD_TSV = Path("data/paper_lists/sources/longread_bioprojects.tsv")
 LONGREAD_DERIVED = Path("data/paper_lists/longread_papers.txt")
