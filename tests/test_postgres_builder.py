@@ -181,6 +181,68 @@ async def test_insert_chunks_skips_chunk_with_null_inside_embedding_vector(tmp_p
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_build_edges_for_chunk_returns_edge_count(tmp_path):
+    """Direct test of the phase-3 helper insert_chunks() and
+    scripts/backfill_chunk_edges.py both call -- covers what the
+    isolation test above exercises only indirectly."""
+    from src.graph.postgres_builder import build_edges_for_chunk
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings(
+        [
+            ("new1", [0.99, 0.01, 0.0, 0.0]),
+            ("existing1", [1.0, 0.0, 0.0, 0.0]),
+            ("existing2", [0.0, 1.0, 0.0, 0.0]),
+        ]
+    )
+    store.ensure_index()
+
+    _, conn = make_mock_pool()
+
+    count = await build_edges_for_chunk(
+        conn,
+        store,
+        "new1",
+        [0.99, 0.01, 0.0, 0.0],
+        similarity_threshold=0.7,
+        max_neighbors=10,
+    )
+    store.close()
+
+    assert count == 1
+    edge_calls = [
+        call for call in conn.executemany.call_args_list if "chunk_edges" in call.args[0]
+    ]
+    assert len(edge_calls) == 1
+    inserted_edges = edge_calls[0].args[1]
+    assert len(inserted_edges) == 1
+    src, dst, similarity = inserted_edges[0]
+    assert (src, dst) == ("new1", "existing1")
+    assert similarity == pytest.approx(0.9998, abs=1e-3)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_build_edges_for_chunk_no_qualifying_neighbors_inserts_nothing(tmp_path):
+    from src.graph.postgres_builder import build_edges_for_chunk
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings([("new1", [1.0, 0.0, 0.0, 0.0]), ("far", [0.0, 0.0, 0.0, 1.0])])
+    store.ensure_index()
+
+    _, conn = make_mock_pool()
+
+    count = await build_edges_for_chunk(
+        conn, store, "new1", [1.0, 0.0, 0.0, 0.0], similarity_threshold=0.7
+    )
+    store.close()
+
+    assert count == 0
+    conn.executemany.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_insert_chunks_isolates_phase3_failure_to_one_chunk(tmp_path):
     """Phases 1-2 (Postgres rows + DuckDB embeddings) already committed
     for every chunk by the time phase 3 (neighbor search + edges) runs --

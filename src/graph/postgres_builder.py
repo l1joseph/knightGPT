@@ -14,6 +14,54 @@ from .duckdb_store import DuckDBStore
 logger = get_logger(__name__)
 
 
+async def build_edges_for_chunk(
+    conn: asyncpg.Connection,
+    duckdb_store: DuckDBStore,
+    chunk_id: str,
+    embedding: list[float],
+    similarity_threshold: float = 0.7,
+    max_neighbors: int = 10,
+) -> int:
+    """Search DuckDB for chunk_id's nearest neighbors and write
+    chunk_edges rows above similarity_threshold. Shared by insert_chunks()
+    (phase 3, right after a chunk's own Postgres row + embedding are
+    committed) and scripts/backfill_chunk_edges.py (re-running this same
+    step later for a chunk that already exists in Postgres+DuckDB but has
+    no edges -- e.g. because this step previously failed for it, back
+    when a single bad chunk's search failure could abort the rest of a
+    whole insert_chunks() batch instead of being isolated per-chunk).
+
+    Does not catch its own exceptions -- callers that need one chunk's
+    failure to not abort a larger batch wrap this in their own
+    try/except, same as insert_chunks() already does.
+
+    Returns the number of edges inserted.
+    """
+    neighbors = await asyncio.to_thread(
+        duckdb_store.search, embedding, top_k=max_neighbors + 1
+    )
+
+    # The neighbor search can return the chunk itself (distance 0 /
+    # similarity 1.0); exclude it before capping.
+    edges = [
+        (chunk_id, neighbor_id, similarity)
+        for neighbor_id, similarity in neighbors
+        if neighbor_id != chunk_id and similarity >= similarity_threshold
+    ][:max_neighbors]
+
+    if edges:
+        async with conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
+                """,
+                edges,
+            )
+    return len(edges)
+
+
 async def insert_chunks(
     pool: asyncpg.Pool,
     chunks: list[Chunk],
@@ -157,29 +205,14 @@ async def insert_chunks(
         # case that triggered this).
         for chunk in inserted_chunks:
             try:
-                neighbors = await asyncio.to_thread(
-                    duckdb_store.search, chunk.embedding, top_k=max_neighbors + 1
+                stats["edges_inserted"] += await build_edges_for_chunk(
+                    conn,
+                    duckdb_store,
+                    chunk.id,
+                    chunk.embedding,
+                    similarity_threshold,
+                    max_neighbors,
                 )
-
-                # The neighbor search can return the chunk itself (distance
-                # 0 / similarity 1.0); exclude it before capping.
-                edges = [
-                    (chunk.id, neighbor_id, similarity)
-                    for neighbor_id, similarity in neighbors
-                    if neighbor_id != chunk.id and similarity >= similarity_threshold
-                ][:max_neighbors]
-
-                if edges:
-                    async with conn.transaction():
-                        await conn.executemany(
-                            """
-                            INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
-                            VALUES ($1, $2, $3)
-                            ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
-                            """,
-                            edges,
-                        )
-                        stats["edges_inserted"] += len(edges)
             except Exception:
                 logger.exception(
                     f"Chunk {chunk.id}: neighbor search/edge insert failed -- "
