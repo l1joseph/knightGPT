@@ -332,114 +332,93 @@ Confirmed on 2026-09-14 from Cosmos (`VLLM_API_KEY` sourced from this worktree's
 repointed at a different underlying model, re-run this exact call and update both
 `.env.example`'s comment and kl-remote's `.env` — don't carry the old value forward.
 
-## Known issue: `docker-compose.yaml`'s postgres volume path needs overriding before deploy
+## Fetching the current backup dump
 
-`docker/docker-compose.yaml`'s `postgres` service hardcodes a pgdata host
-volume path, `/sdsc/scc/ddp478/l1joseph/knightgpt/pgdata`, that does not
-correspond to Cosmos, kl-remote, or anywhere else currently reachable from
-this repo's own tooling -- it's stale from an earlier environment. Whoever
-deploys on kl-remote needs to override or fix this path to wherever
-Postgres data should actually persist there (a Compose override file,
-matching the pattern the now-removed `docker/docker-compose.local-test.yaml`
-used for the Cosmos singularity proof test, is the standard way to do this
-without editing the base file) **before** the first `docker compose up
-postgres` -- an unwritable or unintended path here fails silently into
-whatever Docker's default anonymous-volume behavior does for a bad host
-path, not with an obvious error. This was flagged during the Cosmos
-singularity proof test (`slurm/singularity_stack_proof_test.slurm`, Task 9)
-but is a real, pre-existing gap in the base compose file, not something
-introduced by or specific to that proof test.
-
-The `postgres` service's other volume line has the identical problem for a
-different path: `docker/docker-compose.yaml:89` mounts
-`/cosmos/vast/scratch/l1joseph/knightgpt/deploy/knightgpt-postgres-20260904-024751.dump`
--- a Cosmos-only absolute path that does not exist on kl-remote either.
-Docker silently bind-mounts an empty directory over a nonexistent host path,
-so `pg_restore` fails there with a directory-not-a-file error rather than a
-clear "file not found." Fetch the actual dump from its S3 backup location
-first, then override the mount path (the same Compose-override mechanism as
-the pgdata path above) to wherever it lands on kl-remote:
+`docker/docker-compose.yaml`'s `postgres` service restores from whatever
+file `POSTGRES_BACKUP_DUMP_PATH` (in `.env`) points at on the deploy host's
+own filesystem -- there's no default, so a missing value fails the
+container at startup rather than silently mounting nothing. Fetch the
+current dump before the first `docker compose up`:
 
 ```bash
-mkdir -p /path/on/kl-remote/knightgpt-deploy
-rclone copy nrp-s3:l1joseph-evo2-test/knightgpt-postgres-backup/20260904-024751/knightgpt-postgres-20260904-024751.dump \
-    /path/on/kl-remote/knightgpt-deploy/
+mkdir -p ~/knightgpt-deploy
+rclone copy nrp-s3:l1joseph-evo2-test/knightgpt-postgres-backup/20260917-084814/knightgpt-postgres-20260917-084814.dump \
+    ~/knightgpt-deploy/
 ```
 
-(same command as the plan's own Step 1 for fetching this backup, just
-pointed at a kl-remote path instead of Cosmos scratch).
+Then set `POSTGRES_BACKUP_DUMP_PATH=~/knightgpt-deploy/knightgpt-postgres-20260917-084814.dump`
+(expanded to an absolute path) in `.env`.
 
-## Re-ingestion after a kl-remote Postgres restore (one-time deploy step)
+**This dump already has a fully-ingested, correctly-embedded corpus** (398
+papers, 18,964 chunks, 140,583 similarity edges as of 2026-09-17, all at
+`qwen3-embedding`'s 4096-dim, plus the Qiita cross-reference tables) --
+`docker/postgres/init/02-restore-backup.sh` restores it as-is and does
+**not** truncate `papers`/`chunks`/`chunk_edges` afterward (an earlier
+version of that script did, back when the only available dump still had
+papers/chunks embedded with the old self-hosted model at the wrong
+dimension -- that was a one-time migration for that specific dump, not a
+general property of restoring a backup). No manual re-ingestion step is
+needed before starting `api` -- `docker compose up -d postgres` followed
+by `docker compose up -d api` is sufficient. If the corpus needs more
+papers later, run `scripts/stream_corpus_ingest.py` (see the root
+`README.md`'s "Adding Papers" section) against the running deployment,
+the same way this dump itself was built up.
 
-This step is **not executable from Cosmos** — it requires a real, reachable Postgres, which
-only exists once the `docker/docker-compose.yaml` stack (Task 7) is actually running on
-kl-remote. It is written up here as an exact runbook for whoever performs that deploy, not
-run as part of this task.
+If a future embedding-model change ever needs the old
+dump-has-wrong-dimension treatment again, do it as a deliberate, explicit
+one-time step against the live database (truncate + re-ingest, same as
+this session's own re-embed effort) -- not by re-adding an unconditional
+truncate to the init script.
 
-After `docker compose up -d postgres` completes its first boot (restore from the Qiita S3
-backup + `TRUNCATE papers, chunks, chunk_edges`, per Task 7's init script) and **before**
-starting the `api`/`open-webui` containers:
+## kl-remote deployment specifics
 
-1. Confirm `VLLM_EMBEDDING_DIM` is set correctly in kl-remote's `.env` per the discovery
-   step above — do not skip this even if it "worked before"; re-verify against a live call
-   if there's any doubt the endpoint's model has changed.
-2. Run the same local ingestion logic already exercised during the 2026-08-28 demo,
-   pointed at kl-remote's Postgres (reachable directly at
-   `postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt` since this Postgres
-   runs locally on kl-remote — no port-forward needed, unlike the NRP in-cluster DSN
-   documented above) and the NRP embedding endpoint:
+kl-remote is a shared host running many projects' containers behind one
+Caddy reverse proxy, with **one shared Open WebUI instance** for the whole
+host (`~/open-webui/`) rather than a separate Open WebUI per project.
+`docker/docker-compose.yaml`'s bundled `open-webui`/`cloudflared`/
+`watchtower` services are NOT used on kl-remote -- they'd duplicate
+existing host infrastructure (kl-remote has no `cloudflared` at all; public
+exposure goes through Caddy) and, worse, directly conflict with it:
+kl-remote already has containers bound to host ports **5432** (Postgres,
+`ornith-litellm-db`), **8080** (`slurm-poller`), and **3000** (`grafana`) --
+the exact ports the base compose file's `postgres`, `api`, and `open-webui`
+services each want.
 
-   ```bash
-   POSTGRES_DSN="postgresql://postgres:$POSTGRES_PASSWORD@localhost:5432/knightgpt" \
-   VLLM_EMBEDDING_URL="https://ellm.nrp-nautilus.io/v1" \
-   VLLM_API_KEY="$VLLM_API_KEY" \
-   VLLM_EMBEDDING_MODEL="qwen3-embedding" \
-   ~/miniforge3/envs/knightGPT/bin/python -c "
-   from scripts.nrp_batch_ingest import run_batch_ingestion
-   from pathlib import Path
-   run_batch_ingestion(paper_lists=[Path('data/paper_lists/initial_papers.txt')], max_papers=3)
-   "
-   ```
+Deploy with `docker/docker-compose.kl-remote.yaml`, which drops the
+duplicate services and moves `postgres` off its (now-conflicting) host
+port entirely (it doesn't need one -- `api` reaches it over the internal
+`knightgpt-net` Docker network) and `api` onto **8083** (confirmed free via
+`ss -tlnp` at deploy time -- verify again if deploying much later, in case
+something else has since claimed it), bound to `127.0.0.1` only since
+Caddy runs as a native host process on kl-remote, not a container:
 
-   **This does not precisely scope ingestion to 3 specific DOIs from
-   `initial_papers.txt`, and it did not during the 2026-08-28 demo either — know this going
-   in, don't be surprised by it:**
-   - `run_batch_ingestion()` unconditionally appends the derived long-read DOI list to
-     whatever `paper_lists` you pass (`all_lists = list(paper_lists) +
-     [ensure_longread_dois_derived()]`, `scripts/nrp_batch_ingest.py` ~line 208), so Phase 1
-     will also attempt to download those long-read papers. In the 2026-08-28 demo these
-     downloads mostly failed locally due to a missing `marker-pdf` dependency — a known,
-     harmless side effect that does not block the 3-paper result. Expect the same failures
-     here and ignore them unless *all* downloads fail.
-   - Phase 2 does not select markdown files per-list — it takes
-     `sorted(markdown_dir.rglob("*.md"))[:max_papers]` across the **entire shared markdown
-     directory**, not filtered by which list a paper's DOI came from. So `max_papers=3`
-     ingests whichever 3 files sort first alphabetically among everything already converted
-     to markdown in that directory — not guaranteed to be `initial_papers.txt`'s first 3
-     DOIs, or even DOIs from `initial_papers.txt` at all if other papers' markdown already
-     exists there. This is exactly what happened on 2026-08-28: the operator targeted 3
-     specific DOIs and got 3 *different*, but still real, papers instead — and the demo
-     still succeeded, because verification only needs 3 real papers with real chunks, not
-     specific ones.
-   - Bottom line: treat this command as producing "some small number (≤3) of real,
-     fully-ingested papers for verification," not as a precise, reproducible selection of
-     `initial_papers.txt`'s first 3 DOIs. If exact DOI selection ever matters for a future
-     use of this script, that would require a code change to `nrp_batch_ingest.py`
-     (out of scope here — that script is pre-existing and untouched by this task).
+```bash
+docker compose -f docker/docker-compose.yaml -f docker/docker-compose.kl-remote.yaml \
+    up -d --build api postgres
+```
 
-3. Verify afterward (live-verification, matching the design spec's Testing section
-   convention of live-verifying real infra rather than unit-testing it). Because of the
-   scoping caveat above, verify counts and content quality, not which specific papers
-   landed:
-   - `SELECT count(*) FROM papers;` → `3` (or fewer, if `max_papers` files include papers
-     already present from a prior run — see the caveat above; a lower count here is a
-     signal to check what actually got ingested, not necessarily a failure)
-   - `SELECT count(*) FROM chunks;` → `> 0`
-   - `SELECT count(*) FROM chunk_edges;` → `> 0`
-   - Spot-check one row, e.g. `SELECT text FROM chunks LIMIT 1;`, and confirm it has
-     real, non-null, non-empty text — not just a non-zero row count.
+Then, two manual steps outside this repo's own tooling:
 
-Only once all four checks pass should `api`/`open-webui` be started
-(`docker compose up -d api open-webui`) — starting them against an empty or
-partially-ingested corpus would make the RAG pipeline silently return nothing useful rather
-than fail loudly.
+1. **Add knightGPT to the shared Open WebUI** as a connection rather than
+   running a second Open WebUI instance: Settings -> Connections -> OpenAI
+   API, base URL `http://<kl-remote-host-or-container-network-address>:8083/v1`,
+   API key `EMPTY` (matches the API's own lack of auth on that route --
+   see the security note below).
+2. **Add a Caddy block** routing the public hostname to `127.0.0.1:8083`,
+   following the same pattern already used for other projects on this host
+   (see `~/Caddyfile`'s existing block for qiita-web, which proxies
+   `/api/*` to a local port the same way). Confirm the hostname actually
+   points at kl-remote before relying on this -- `knightgpt.knight-lab-dev.org`
+   and `knightgpt-api.knight-lab-dev.org` both resolved to a Vercel wildcard
+   record (`name.vercel-dns.com`) as of 2026-09-24, meaning neither pointed
+   at kl-remote yet; that needs a specific DNS record added first.
+
+**Security note:** none of `/api/v1/chat`, `/api/v1/agent/chat`,
+`/api/v1/search`, or `/v1/chat/completions` have any authentication --
+only `/api/v1/webhook/briefing` checks a shared secret. Exposing
+`knightgpt-api.knight-lab-dev.org` publicly means anyone can call those
+routes directly, including `/api/v1/agent/chat`, which makes real
+NRP-billed LLM calls and can trigger external tool lookups. Prefer routing
+end-user traffic through the shared Open WebUI (gated by kl-remote's
+existing `oauth2-proxy` pattern) rather than exposing the bare API
+subdomain, unless and until an API-key check is added to these routes.
