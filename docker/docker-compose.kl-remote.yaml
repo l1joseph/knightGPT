@@ -20,7 +20,14 @@
 
 services:
   api:
-    ports:
+    # !override, not a plain list: confirmed live on kl-remote (Docker
+    # Compose v5.1.3) that a plain list here does NOT replace the base
+    # file's "8080:8080" -- it CONCATENATES with it, so the api container
+    # tried to bind both 8080 (already taken by kl-remote's own
+    # slurm-poller container) and 8083, and failed on the former. Same
+    # underlying merge-semantics gotcha as postgres's ports below, just
+    # the "list has a real value" case instead of "list should be empty".
+    ports: !override
       # kl-remote already has containers bound to host port 8080
       # (slurm-poller) -- 8083 confirmed free via `ss -tlnp` before this
       # was picked. Loopback-only: Caddy runs as a native host process on
