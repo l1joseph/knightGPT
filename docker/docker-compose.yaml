@@ -1,5 +1,3 @@
-version: "3.8"
-
 # KnightGPT Full Stack Deployment
 # Includes: API Server, Open WebUI, Postgres (pgGraph), embedded DuckDB
 # (vector search, kept separate from Postgres -- see

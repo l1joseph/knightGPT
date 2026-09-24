@@ -1,5 +1,3 @@
-version: "3.8"
-
 # kl-remote deployment override. kl-remote already runs a shared Open
 # WebUI instance, its own Caddy-based reverse proxy, and oauth2-proxy for
 # auth in front of exposed services -- so this override drops the
@@ -38,4 +36,12 @@ services:
     # (POSTGRES_DSN uses the "postgres" service hostname, not localhost).
     # pgdata volume and POSTGRES_BACKUP_DUMP_PATH are already portable in
     # the base file -- nothing kl-remote-specific to override there.
-    ports: []
+    #
+    # Plain `ports: []` does NOT reliably clear the base file's
+    # "5432:5432" -- confirmed live on kl-remote (Docker Compose v5.1.3):
+    # it left the base mapping in place and failed to start with "port is
+    # already allocated" (5432 is already used by kl-remote's own
+    # ornith-litellm-db container). !reset is the documented, explicit way
+    # to force a list override to empty rather than being silently
+    # ignored as a no-op.
+    ports: !reset []
