@@ -85,8 +85,14 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
       - POSTGRES_DB=knightgpt
     volumes:
-      - /sdsc/scc/ddp478/l1joseph/knightgpt/pgdata:/var/lib/postgresql/data
-      - /cosmos/vast/scratch/l1joseph/knightgpt/deploy/knightgpt-postgres-20260904-024751.dump:/docker-entrypoint-initdb.d/backup.dump:ro
+      - pgdata:/var/lib/postgresql/data
+      # POSTGRES_BACKUP_DUMP_PATH: absolute path, on this host's own
+      # filesystem, to the pg_dump file to restore from on first boot --
+      # see k8s/nrp/README.md for how to fetch the current one. No
+      # default here deliberately: a stale hardcoded path here (this used
+      # to point at a specific Cosmos scratch path with the original
+      # 2026-09-04 dump) is worse than failing fast at startup.
+      - ${POSTGRES_BACKUP_DUMP_PATH:?POSTGRES_BACKUP_DUMP_PATH must be set -- see k8s/nrp/README.md for how to fetch the current backup dump}:/docker-entrypoint-initdb.d/backup.dump:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres", "-d", "knightgpt"]
       interval: 10s
@@ -128,6 +134,7 @@ volumes:
   api-logs:
   open-webui-data:
   duckdb-data:
+  pgdata:
 
 networks:
   knightgpt-net:

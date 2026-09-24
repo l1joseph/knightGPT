@@ -1,0 +1,41 @@
+version: "3.8"
+
+# kl-remote deployment override. kl-remote already runs a shared Open
+# WebUI instance, its own Caddy-based reverse proxy, and oauth2-proxy for
+# auth in front of exposed services -- so this override drops the
+# self-contained open-webui/cloudflared/watchtower services from the base
+# docker-compose.yaml entirely (they'd duplicate existing host
+# infrastructure and conflict with it -- see the port-conflict notes
+# below) and only adjusts api/postgres for kl-remote's actual constraints.
+#
+# Deploy with only the api/postgres services (never bring up the base
+# file's open-webui/cloudflared/watchtower on kl-remote):
+#
+#   docker compose -f docker/docker-compose.yaml -f docker/docker-compose.kl-remote.yaml \
+#     up -d --build api postgres
+#
+# Then add knightGPT as a connection in kl-remote's existing shared Open
+# WebUI (Settings -> Connections -> OpenAI API, base URL
+# http://<kl-remote-host>:8083/v1, API key EMPTY) and add a Caddy block
+# routing the public hostname to 127.0.0.1:8083 (see qiita-web's ~/Caddyfile
+# block for the pattern this repo's own Caddy setup already uses).
+
+services:
+  api:
+    ports:
+      # kl-remote already has containers bound to host port 8080
+      # (slurm-poller) -- 8083 confirmed free via `ss -tlnp` before this
+      # was picked. Loopback-only: Caddy runs as a native host process on
+      # kl-remote (not containerized), so 127.0.0.1 is reachable to it
+      # directly; nothing else needs this exposed on other interfaces.
+      - "127.0.0.1:8083:8080"
+
+  postgres:
+    # No host port published -- kl-remote already has a Postgres container
+    # bound to host port 5432 (ornith-litellm-db), and nothing besides the
+    # api container needs direct psql access. The api container reaches
+    # this one over the internal knightgpt-net Docker network
+    # (POSTGRES_DSN uses the "postgres" service hostname, not localhost).
+    # pgdata volume and POSTGRES_BACKUP_DUMP_PATH are already portable in
+    # the base file -- nothing kl-remote-specific to override there.
+    ports: []
