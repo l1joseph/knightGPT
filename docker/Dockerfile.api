@@ -35,8 +35,13 @@ RUN pip install --upgrade pip && \
 # empty placeholder directory nothing reads.
 COPY src/ ./src/
 
-# Create data directories
-RUN mkdir -p data/raw_pdfs data/markdown data/processed logs && \
+# Create data directories, including duckdb_data -- it's only ever
+# referenced via docker-compose.yaml's volume mount (INGEST_DUCKDB_PATH),
+# never created here otherwise, so a fresh named volume mounted over it
+# would get created with root ownership and be unwritable by appuser
+# below. Pre-creating it here means Docker propagates *this* directory's
+# ownership to a new empty volume on first mount instead.
+RUN mkdir -p data/raw_pdfs data/markdown data/processed duckdb_data logs && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
