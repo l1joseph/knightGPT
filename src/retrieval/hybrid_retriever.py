@@ -25,6 +25,7 @@ from ..chunking import Chunk
 from ..embedding import VLLMEmbedder
 from ..graph.duckdb_store import DuckDBStore
 from ..utils import get_logger, get_settings
+from ..utils.db import sync_graph_on_connect
 from .base import BaseRetriever, RetrievalResult
 
 logger = get_logger(__name__)
@@ -87,6 +88,7 @@ class HybridRetriever(BaseRetriever):
             dsn=self.dsn,
             min_size=settings.postgres.pool_min_size,
             max_size=settings.postgres.pool_max_size,
+            init=sync_graph_on_connect,
         )
 
     def retrieve(
