@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -187,6 +187,23 @@ def get_orchestrator() -> AgentOrchestrator:
     return _orchestrator
 
 
+def verify_api_key(authorization: Optional[str] = Header(default=None)) -> None:
+    """Dependency enforcing a shared-secret bearer token on RAG-facing
+    routes (chat, agent chat, search, and the OpenAI-compatible completions
+    endpoint) -- previously none of them checked anything at all. Reuses
+    settings.api.api_key rather than adding a second secret: the same value
+    already gates /api/v1/webhook/briefing via X-Webhook-Secret, so one
+    API_KEY env var now protects both. A no-op when API_KEY is unset,
+    matching the webhook's existing "if webhook_secret:" behavior -- keeps
+    local/dev/proof-test deploys open by default; only a deploy that sets
+    API_KEY (e.g. kl-remote) enforces this."""
+    api_key = settings.api.api_key
+    if not api_key:
+        return
+    if authorization != f"Bearer {api_key}":
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
 # Routes
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -286,6 +303,7 @@ async def health_check():
 async def chat(
     request: ChatRequest,
     rag_engine: RAGEngine = Depends(get_rag_engine),
+    _: None = Depends(verify_api_key),
 ):
     """
     RAG-enhanced chat completion.
@@ -338,6 +356,7 @@ async def chat(
 async def semantic_search(
     request: SearchRequest,
     retriever: HybridRetriever = Depends(get_retriever),
+    _: None = Depends(verify_api_key),
 ) -> list[SearchResult]:
     """
     Semantic search over the knowledge base.
@@ -596,7 +615,7 @@ class AgentChatRequest(BaseModel):
 
 
 @app.post("/api/v1/agent/chat")
-async def agent_chat(request: AgentChatRequest):
+async def agent_chat(request: AgentChatRequest, _: None = Depends(verify_api_key)):
     """
     Multi-agent RAG chat with tool use.
 
@@ -653,7 +672,7 @@ async def list_models():
 
 
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(request: Request):
+async def openai_chat_completions(request: Request, _: None = Depends(verify_api_key)):
     """
     OpenAI-compatible chat completions endpoint, backed by the real
     multi-tool agent loop (not plain RAG) -- see
