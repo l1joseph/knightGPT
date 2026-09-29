@@ -28,6 +28,17 @@ services:
       # volume instead.
       - INGEST_DUCKDB_PATH=/app/duckdb_data/embeddings.duckdb
       - LOG_LEVEL=INFO
+      # Shared secret required in an "Authorization: Bearer <key>" header on
+      # /api/v1/chat, /api/v1/agent/chat, /api/v1/search, and
+      # /v1/chat/completions (see verify_api_key() in src/api/main.py) --
+      # also reused as the existing /api/v1/webhook/briefing shared secret.
+      # No default and not required (:? / :-): unset means those routes stay
+      # open, matching every deploy before this one (local dev, the SLURM
+      # proof test). Set API_API_KEY in kl-remote's .env to turn this on --
+      # if you do, update the API key in kl-remote's Open WebUI connection
+      # (Settings -> Connections) to match, or Open WebUI's calls to
+      # /v1/chat/completions will start failing with 401.
+      - API_API_KEY=${API_API_KEY:-}
     volumes:
       - ../data:/app/data:ro
       - duckdb-data:/app/duckdb_data
