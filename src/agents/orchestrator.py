@@ -87,6 +87,7 @@ class AgentOrchestrator:
         max_tool_rounds: int = 5,
         temperature: float = 0.3,
         max_tokens: int = 2000,
+        history: list[dict] | None = None,
     ) -> AgentContext:
         """Run the function-calling agent loop.
 
@@ -103,6 +104,16 @@ class AgentOrchestrator:
                 makes (both the per-round tool-calling calls and the forced
                 final-answer call).
             max_tokens: max tokens for every LLM call this run makes.
+            history: prior turns of this conversation, as OpenAI-style
+                {"role": "user"|"assistant", "content": str} dicts, oldest
+                first, NOT including the current query -- confirmed live on
+                kl-remote that omitting this made every follow-up question
+                in a multi-turn Open WebUI chat ("so what are the
+                microbes" after "what microbes are associated with AD?")
+                get answered as if it were a brand-new conversation.
+                Passed straight through to every LLM call this run makes.
+                Optional; omitted or empty means a single-turn conversation
+                (unchanged prior behavior).
         """
         emit = on_event or (lambda event: None)
         ctx = AgentContext(original_query=query)
@@ -120,6 +131,8 @@ class AgentOrchestrator:
                     "content": f"Knowledge graph context:\n{rag_context}",
                 }
             )
+        if history:
+            messages.extend(history)
         messages.append({"role": "user", "content": query})
 
         tool_schemas = [tool.openai_tool_schema for tool in self.tools.values()]

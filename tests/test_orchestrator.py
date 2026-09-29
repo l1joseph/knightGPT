@@ -260,3 +260,61 @@ def test_temperature_and_max_tokens_are_passed_to_llm_calls():
     call_kwargs = orchestrator.client.chat.completions.create.call_args_list[0].kwargs
     assert call_kwargs["temperature"] == 0.9
     assert call_kwargs["max_tokens"] == 512
+
+
+@pytest.mark.unit
+def test_history_is_included_between_system_prompt_and_current_query():
+    """Confirmed live on kl-remote: without history reaching the LLM call,
+    a follow-up question ("so what are the microbes") got answered as a
+    brand-new conversation with no memory of the prior turn."""
+    from src.agents.orchestrator import AgentOrchestrator
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_final_answer_response("the ones we already discussed"),
+    ]
+
+    history = [
+        {"role": "user", "content": "what microbes are associated with AD?"},
+        {"role": "assistant", "content": "Several taxa have been studied..."},
+    ]
+    orchestrator.run("so what are the microbes", history=history)
+
+    call_kwargs = orchestrator.client.chat.completions.create.call_args_list[0].kwargs
+    sent_messages = call_kwargs["messages"]
+
+    assert sent_messages[0]["role"] == "system"
+    assert sent_messages[1:3] == history
+    assert sent_messages[-1] == {
+        "role": "user",
+        "content": "so what are the microbes",
+    }
+
+
+@pytest.mark.unit
+def test_no_history_matches_prior_single_turn_behavior():
+    """Omitting history (the default) must produce the exact same messages
+    list as before this feature existed -- single-turn callers (e.g.
+    /api/v1/agent/chat) must see no behavior change."""
+    from src.agents.orchestrator import AgentOrchestrator, GENERATOR_SYSTEM_PROMPT
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_final_answer_response("direct answer"),
+    ]
+
+    orchestrator.run("simple query")
+
+    call_kwargs = orchestrator.client.chat.completions.create.call_args_list[0].kwargs
+    assert call_kwargs["messages"] == [
+        {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
+        {"role": "user", "content": "simple query"},
+    ]

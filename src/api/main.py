@@ -671,6 +671,43 @@ async def list_models():
     }
 
 
+def _split_latest_user_message(
+    messages: list[dict],
+) -> tuple[str | None, list[dict]]:
+    """Split an OpenAI-style messages array into (latest user message
+    content, prior-turn history).
+
+    history is everything before the latest user message, in order,
+    filtered to plain {"role": "user"|"assistant", "content": str} turns
+    -- passed to AgentOrchestrator.run() so follow-up questions ("so what
+    are the microbes") can resolve against what was already said in this
+    chat. Confirmed live on kl-remote that without this, every message
+    after the first got answered as a brand-new, context-free
+    conversation. System messages are dropped: the orchestrator has its
+    own GENERATOR_SYSTEM_PROMPT, and Open WebUI never sees a prior turn's
+    tool-calling internals (sse_adapter.py resolves those server-side), so
+    only plain user/assistant content ever appears here.
+
+    Returns (None, []) if messages contains no user-role entry.
+    """
+    user_message = None
+    user_message_idx = None
+    for idx, msg in enumerate(messages):
+        if msg.get("role") == "user":
+            user_message = msg.get("content")
+            user_message_idx = idx
+
+    if user_message_idx is None:
+        return None, []
+
+    history = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in messages[:user_message_idx]
+        if msg.get("role") in ("user", "assistant") and msg.get("content")
+    ]
+    return user_message, history
+
+
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(request: Request, _: None = Depends(verify_api_key)):
     """
@@ -688,11 +725,7 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
     temperature = data.get("temperature", 0.3)
     max_tokens = data.get("max_tokens", 2000)
 
-    user_message = None
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            user_message = msg.get("content")
-            break
+    user_message, history = _split_latest_user_message(messages)
 
     if not user_message:
         raise HTTPException(status_code=400, detail="No user message found")
@@ -718,6 +751,7 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
                         on_event=on_event,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        history=history,
                     )
                 finally:
                     event_queue.put(SENTINEL)
@@ -745,6 +779,7 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
         on_event=events.append,
         temperature=temperature,
         max_tokens=max_tokens,
+        history=history,
     )
 
     return {
