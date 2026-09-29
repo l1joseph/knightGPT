@@ -38,10 +38,15 @@ def test_done_event_becomes_stop_finish_reason_chunk():
 
 
 @pytest.mark.unit
-def test_tool_call_event_becomes_tool_calls_delta_with_tool_calls_finish_reason():
-    """The known Open WebUI bug this guards against: a tool-calling turn's
-    final chunk MUST report finish_reason='tool_calls', not 'stop', or
-    Open WebUI silently fails to render the tool-call status."""
+def test_tool_call_event_produces_no_chunks():
+    """Confirmed live against kl-remote's Open WebUI: emitting a real
+    OpenAI-protocol tool_calls delta + finish_reason="tool_calls" is a
+    standing instruction to the CLIENT to execute the named function
+    itself. Open WebUI followed that protocol correctly and failed with
+    "Tool ... not found" (it has no knowledge of knightGPT's server-side-
+    resolved tools), visibly breaking chat responses. Tool execution is
+    already fully resolved server-side by AgentOrchestrator, so this event
+    type produces no chunks, same as "tool_result"."""
     from src.api.sse_adapter import event_to_sse_chunks
 
     event = {
@@ -51,59 +56,7 @@ def test_tool_call_event_becomes_tool_calls_delta_with_tool_calls_finish_reason(
         "call_id": "call_abc123",
         "index": 0,
     }
-    chunks = event_to_sse_chunks(event, chat_id="chatcmpl-1")
-
-    assert chunks == [
-        {
-            "id": "chatcmpl-1",
-            "object": "chat.completion.chunk",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": "call_abc123",
-                                "type": "function",
-                                "function": {
-                                    "name": "pubmed_search",
-                                    "arguments": '{"query": "gut microbiome"}',
-                                },
-                            }
-                        ]
-                    },
-                    "finish_reason": None,
-                }
-            ],
-        },
-        {
-            "id": "chatcmpl-1",
-            "object": "chat.completion.chunk",
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-        },
-    ]
-
-
-@pytest.mark.unit
-def test_second_simultaneous_tool_call_uses_its_own_index():
-    """Two tool calls requested in the same round must land on distinct
-    tool_calls[i] slots -- OpenAI-spec clients merge streaming tool-call
-    deltas by array index, so two events both claiming index 0 would let
-    the second call's name/arguments silently overwrite the first's."""
-    from src.api.sse_adapter import event_to_sse_chunks
-
-    event = {
-        "type": "tool_call",
-        "tool_name": "kegg_lookup",
-        "args": {"query": "glycolysis"},
-        "call_id": "call_def456",
-        "index": 1,
-    }
-    chunks = event_to_sse_chunks(event, chat_id="chatcmpl-1")
-
-    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["index"] == 1
-    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["id"] == "call_def456"
+    assert event_to_sse_chunks(event, chat_id="chatcmpl-1") == []
 
 
 @pytest.mark.unit
