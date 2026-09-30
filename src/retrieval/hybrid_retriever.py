@@ -24,6 +24,7 @@ import asyncpg
 from ..chunking import Chunk
 from ..embedding import VLLMEmbedder
 from ..graph.duckdb_store import DuckDBStore
+from ..graph.postgres_builder import insert_chunks
 from ..utils import get_logger, get_settings
 from ..utils.db import sync_graph_on_connect
 from .base import BaseRetriever, RetrievalResult
@@ -98,6 +99,66 @@ class HybridRetriever(BaseRetriever):
         expand_context: bool = True,
     ) -> RetrievalResult:
         return self._run(self._retrieve_async(query, top_k, expand_context))
+
+    def insert_paper(
+        self,
+        doi: str,
+        chunks: list[Chunk],
+        title: str = "",
+        metadata: Optional[dict] = None,
+        similarity_threshold: float = 0.7,
+        max_neighbors: int = 10,
+    ) -> dict:
+        """Insert one newly-ingested paper's already-chunked-and-embedded
+        chunks into Postgres (text/metadata), DuckDB (embeddings), and
+        pgGraph (similarity edges), via this retriever's existing pool and
+        DuckDB store -- see module docstring.
+
+        This is the write-side counterpart to retrieve(): it reuses the
+        exact same self._pool / self._run / self.duckdb_store this
+        instance already owns, so it never opens a second DuckDB
+        connection (which would raise on a lock conflict, since
+        DuckDBStore supports exactly one read-write connection per file --
+        see src/graph/duckdb_store.py) and never creates a second asyncpg
+        pool. Synchronous; safe to call from any thread, including one
+        already inside a running event loop -- e.g. from
+        IngestPaperTool.execute(), itself called from
+        AgentOrchestrator.run() while that runs on a worker thread
+        dispatched via run_in_threadpool from an async request handler.
+
+        Args:
+            doi: the paper's DOI -- written as every chunk's papers.doi /
+                chunks.paper_doi (the same primary key convention
+                src/ingestion/doi_resolver.py resolves existing corpus
+                papers to).
+            chunks: chunks with embeddings already populated (chunking +
+                embedding happen before this call -- they don't need the
+                Postgres/DuckDB bridge this method exists for).
+            title: paper title, if known.
+            metadata: extra paper metadata to store alongside title/doi.
+            similarity_threshold: minimum cosine similarity for a new
+                chunk_edges row (passed through to insert_chunks).
+            max_neighbors: maximum edges per new chunk (passed through to
+                insert_chunks).
+
+        Returns:
+            Stats dict from insert_chunks: papers_inserted,
+            chunks_inserted, edges_inserted.
+        """
+        papers = {
+            c.source_file: {"doi": doi, "title": title, "metadata": metadata or {}}
+            for c in chunks
+        }
+        return self._run(
+            insert_chunks(
+                self._pool,
+                chunks,
+                papers,
+                self.duckdb_store,
+                similarity_threshold=similarity_threshold,
+                max_neighbors=max_neighbors,
+            )
+        )
 
     def close(self) -> None:
         """Close the pool and stop the private event loop. Call once, at

@@ -23,6 +23,7 @@ from ..tools.pubmed import PubMedTool
 from ..tools.openalex import OpenAlexTool
 from ..tools.kegg import KEGGTool
 from ..tools.qiime2 import QIIME2Tool
+from ..tools.ingest_paper import IngestPaperTool
 from ..utils import get_logger, get_settings
 
 logger = get_logger(__name__)
@@ -71,6 +72,7 @@ class AgentOrchestrator:
             "openalex_search": OpenAlexTool(),
             "kegg_lookup": KEGGTool(),
             "qiime2_docs": QIIME2Tool(),
+            "ingest_paper": IngestPaperTool(retriever=retriever),
         }
 
         self.client = OpenAI(

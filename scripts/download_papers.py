@@ -167,6 +167,96 @@ def fetch_pmc_fulltext(pmcid: str, session) -> Optional[dict]:
         return None
 
 
+def download_single_paper(
+    doi: str,
+    scraper: MicrobiomeScraper,
+    download_dir: Path,
+    markdown_dir: Path,
+) -> dict:
+    """Resolve and download exactly one DOI's full text, trying (in order)
+    Unpaywall, PMC full-text XML, then DOI-redirect page-scraping -- see
+    this module's docstring for why in that order. This is the per-DOI
+    unit of work download_papers() runs in its loop; it is factored out
+    here so a single-DOI caller (e.g. the ingest_paper agent tool in
+    src/tools/ingest_paper.py, invoked live from a chat turn) can reuse
+    the exact same resolution logic instead of re-deriving it, and so the
+    two paths can never silently drift apart.
+
+    Returns a dict:
+        {"status": "skipped", "doi": doi}
+            -- a file already exists for this DOI's safe_name in
+               download_dir; nothing was fetched.
+        {"status": "downloaded", "doi": doi, "doc": ScrapedDocument, "source": str}
+            -- source is one of "unpaywall", "pmc_fulltext_xml",
+               "page_scrape".
+        {"status": "failed", "doi": doi, "reason": str}
+            -- reason is "no_fulltext_found" (no strategy located any
+               full text) or "download_or_convert" (a PDF URL was found
+               but downloading/converting it failed).
+    """
+    safe_name = doi_to_safe_name(doi)
+    existing = list(download_dir.glob(f"*{safe_name}*"))
+    if existing:
+        return {"status": "skipped", "doi": doi}
+
+    # Strategy 1: Unpaywall
+    pdf_url = resolve_doi_unpaywall(doi, scraper.session)
+    source = "unpaywall"
+
+    doc: Optional[ScrapedDocument] = None
+
+    # Strategy 2: PMC full-text XML (not a PDF fetch -- see module
+    # docstring for why the old PDF-URL approach no longer works here)
+    if not pdf_url:
+        pmcid = resolve_doi_pmc_id(doi, scraper.session)
+        if pmcid:
+            fulltext = fetch_pmc_fulltext(pmcid, scraper.session)
+            if fulltext:
+                output_path = markdown_dir / f"{safe_name}.md"
+                output_path.write_text(fulltext["text"], encoding="utf-8")
+                doc = ScrapedDocument(
+                    url=f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/",
+                    title=fulltext["title"] or safe_name,
+                    content_type="application/xml",
+                    file_path=output_path,
+                    metadata={"pmcid": pmcid},
+                )
+                source = "pmc_fulltext_xml"
+
+    # Strategy 3: DOI redirect + scrape
+    if doc is None and not pdf_url:
+        doi_url = f"https://doi.org/{doi}"
+        try:
+            resp = scraper.session.get(doi_url, allow_redirects=True, timeout=15)
+            if resp.status_code == 200:
+                # Try to find PDF link on the landing page
+                from bs4 import BeautifulSoup
+
+                soup = BeautifulSoup(resp.text, "html.parser")
+                pdf_links = scraper._find_pdf_links(soup, resp.url)
+                if pdf_links:
+                    pdf_url = pdf_links[0]
+                    source = "page_scrape"
+        except Exception as e:
+            logger.debug(f"  DOI redirect scrape failed: {e}")
+
+    if doc is None and pdf_url:
+        logger.info(f"  Found PDF via {source}: {pdf_url}")
+        doc = scraper._download_and_process(pdf_url, safe_name)
+
+    if doc:
+        doc.metadata["doi"] = doi
+        doc.metadata["source"] = source
+        logger.info(f"  Downloaded and converted: {doc.file_path}")
+        return {"status": "downloaded", "doi": doi, "doc": doc, "source": source}
+    elif pdf_url:
+        logger.warning("  Download/convert failed")
+        return {"status": "failed", "doi": doi, "reason": "download_or_convert"}
+    else:
+        logger.warning("  Could not resolve full text")
+        return {"status": "failed", "doi": doi, "reason": "no_fulltext_found"}
+
+
 def download_papers(
     doi_file: Path,
     output_dir: Path | None = None,
@@ -224,81 +314,26 @@ def download_papers(
     for i, doi in enumerate(dois, 1):
         logger.info(f"[{i}/{len(dois)}] Processing DOI: {doi}")
 
-        # Check if already downloaded
         safe_name = doi_to_safe_name(doi)
         pdf_path = download_dir / f"{safe_name}.pdf"
-        existing = list(download_dir.glob(f"*{safe_name}*"))
-        if existing:
-            logger.info(f"  Already downloaded: {existing[0].name}")
+
+        result = download_single_paper(doi, scraper, download_dir, markdown_dir)
+        doc = result.get("doc")
+
+        if result["status"] == "skipped":
+            logger.info("  Already downloaded")
             stats["skipped"] += 1
             stats["details"].append({"doi": doi, "status": "skipped"})
-            continue
-
-        # Strategy 1: Unpaywall
-        pdf_url = resolve_doi_unpaywall(doi, scraper.session)
-        source = "unpaywall"
-
-        doc: Optional[ScrapedDocument] = None
-
-        # Strategy 2: PMC full-text XML (not a PDF fetch -- see module
-        # docstring for why the old PDF-URL approach no longer works here)
-        if not pdf_url:
-            pmcid = resolve_doi_pmc_id(doi, scraper.session)
-            if pmcid:
-                fulltext = fetch_pmc_fulltext(pmcid, scraper.session)
-                if fulltext:
-                    output_path = markdown_dir / f"{safe_name}.md"
-                    output_path.write_text(fulltext["text"], encoding="utf-8")
-                    doc = ScrapedDocument(
-                        url=f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/",
-                        title=fulltext["title"] or safe_name,
-                        content_type="application/xml",
-                        file_path=output_path,
-                        metadata={"pmcid": pmcid},
-                    )
-                    source = "pmc_fulltext_xml"
-
-        # Strategy 3: DOI redirect + scrape
-        if doc is None and not pdf_url:
-            doi_url = f"https://doi.org/{doi}"
-            try:
-                resp = scraper.session.get(doi_url, allow_redirects=True, timeout=15)
-                if resp.status_code == 200:
-                    # Try to find PDF link on the landing page
-                    from bs4 import BeautifulSoup
-
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    pdf_links = scraper._find_pdf_links(soup, resp.url)
-                    if pdf_links:
-                        pdf_url = pdf_links[0]
-                        source = "page_scrape"
-            except Exception as e:
-                logger.debug(f"  DOI redirect scrape failed: {e}")
-
-        if doc is None and pdf_url:
-            logger.info(f"  Found PDF via {source}: {pdf_url}")
-            doc = scraper._download_and_process(pdf_url, safe_name)
-
-        if doc:
-            doc.metadata["doi"] = doi
-            doc.metadata["source"] = source
+        elif result["status"] == "downloaded":
             stats["downloaded"] += 1
             stats["details"].append(
-                {"doi": doi, "status": "downloaded", "source": source}
+                {"doi": doi, "status": "downloaded", "source": result["source"]}
             )
-            logger.info(f"  Downloaded and converted: {doc.file_path}")
-        elif pdf_url:
-            stats["failed"] += 1
-            stats["details"].append(
-                {"doi": doi, "status": "failed", "reason": "download_or_convert"}
-            )
-            logger.warning(f"  Download/convert failed")
         else:
             stats["failed"] += 1
             stats["details"].append(
-                {"doi": doi, "status": "failed", "reason": "no_fulltext_found"}
+                {"doi": doi, "status": "failed", "reason": result["reason"]}
             )
-            logger.warning(f"  Could not resolve full text")
 
         if on_paper_processed is not None:
             on_paper_processed(doi, doc, pdf_path)
@@ -376,7 +411,7 @@ def main():
             print(f"  {key}: {value}")
 
     # Print summary
-    print(f"\nDownload Summary:")
+    print("\nDownload Summary:")
     print(f"  Total DOIs: {stats['total_dois']}")
     print(f"  Downloaded: {stats['downloaded']}")
     print(f"  Skipped:    {stats['skipped']}")
