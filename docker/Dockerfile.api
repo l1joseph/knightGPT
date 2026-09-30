@@ -34,6 +34,16 @@ RUN pip install --upgrade pip && \
 # actually reaches this step. Removed rather than papering over it with an
 # empty placeholder directory nothing reads.
 COPY src/ ./src/
+# scripts/ is also a real runtime dependency, not just standalone CLI
+# tooling: src/tools/ingest_paper.py's IngestPaperTool.execute() does a
+# deferred `from scripts.download_papers import download_single_paper` at
+# call time (deferred specifically to avoid a module-import-time ordering
+# problem -- see that file's comment), which still requires scripts/ to
+# actually exist in the image. Confirmed live on kl-remote: omitting this
+# COPY produced "No module named 'scripts'" the first time ingest_paper
+# was actually invoked from a chat turn -- unit tests never caught it
+# because they run against the full repo checkout, not this image.
+COPY scripts/ ./scripts/
 
 # Create data directories, including duckdb_data -- it's only ever
 # referenced via docker-compose.yaml's volume mount (INGEST_DUCKDB_PATH),
