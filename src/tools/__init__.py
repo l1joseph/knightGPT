@@ -5,6 +5,7 @@ from .openalex import OpenAlexTool
 from .kegg import KEGGTool
 from .qiime2 import QIIME2Tool
 from .zotero import ZoteroTool
+from .ingest_paper import IngestPaperTool
 
 __all__ = [
     "PubMedTool",
@@ -12,4 +13,5 @@ __all__ = [
     "KEGGTool",
     "QIIME2Tool",
     "ZoteroTool",
+    "IngestPaperTool",
 ]

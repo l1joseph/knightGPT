@@ -25,6 +25,27 @@ def make_mock_pool(fetch_side_effects):
     return pool, conn
 
 
+def make_mock_pool_for_insert():
+    """Like make_mock_pool, but also supports conn.transaction() and
+    conn.execute() -- what insert_chunks() (src/graph/postgres_builder.py)
+    needs, matching tests/test_postgres_builder.py's own mock pool."""
+    conn = AsyncMock()
+
+    transaction_cm = MagicMock()
+    transaction_cm.__aenter__ = AsyncMock(return_value=None)
+    transaction_cm.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=transaction_cm)
+
+    acquire_cm = MagicMock()
+    acquire_cm.__aenter__ = AsyncMock(return_value=conn)
+    acquire_cm.__aexit__ = AsyncMock(return_value=False)
+
+    pool = MagicMock()
+    pool.acquire.return_value = acquire_cm
+    pool.close = AsyncMock()
+    return pool, conn
+
+
 @pytest.mark.unit
 def test_retrieve_returns_nearest_chunks_from_duckdb(tmp_path):
     """retrieve() should embed the query, search DuckDB, then fetch full
@@ -222,3 +243,85 @@ def test_retrieve_callable_from_inside_a_running_event_loop(tmp_path):
     result = asyncio.run(call_from_within_a_running_loop())
     store.close()
     assert result.chunks == []
+
+
+@pytest.mark.unit
+def test_insert_paper_inserts_via_existing_pool_and_duckdb_store(tmp_path):
+    """insert_paper() must reuse this retriever's own self._pool and
+    self.duckdb_store (via insert_chunks) -- never open a second DuckDB
+    connection or a second asyncpg pool -- and return insert_chunks'
+    stats dict."""
+    from src.chunking import Chunk
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+
+    mock_create_pool = AsyncMock(return_value=pool)
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=mock_create_pool,
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+
+        chunk = Chunk(
+            id="new1",
+            text="hello world",
+            source_file="10.1038/x",
+            embedding=[0.1, 0.2, 0.3, 0.4],
+        )
+        stats = retriever.insert_paper(doi="10.1038/x", chunks=[chunk], title="A Paper")
+        retriever.close()
+    store.close()
+
+    # Exactly one pool for the whole retriever lifetime, including this
+    # write -- insert_paper must not create its own.
+    assert mock_create_pool.call_count == 1
+    assert stats["chunks_inserted"] == 1
+
+    insert_call = next(
+        c for c in conn.execute.call_args_list if "INSERT INTO chunks" in c.args[0]
+    )
+    assert insert_call.args[2] == "10.1038/x"  # paper_doi column
+
+
+@pytest.mark.unit
+def test_insert_paper_callable_from_inside_a_running_event_loop(tmp_path):
+    """Same real bug retrieve() fixes, but for the write path: insert_paper()
+    must work when called synchronously from code already inside a running
+    event loop (e.g. IngestPaperTool.execute() invoked from
+    AgentOrchestrator.run(), itself dispatched via run_in_threadpool from
+    an async request handler)."""
+    import asyncio
+
+    from src.chunking import Chunk
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+
+    async def call_from_within_a_running_loop():
+        with patch(
+            "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+            new=AsyncMock(return_value=pool),
+        ):
+            retriever = HybridRetriever(
+                dsn="postgresql://test", duckdb_store=store, embedder=embedder
+            )
+            chunk = Chunk(
+                id="new1",
+                text="hello world",
+                source_file="10.1038/x",
+                embedding=[0.1, 0.2, 0.3, 0.4],
+            )
+            stats = retriever.insert_paper(doi="10.1038/x", chunks=[chunk])
+            retriever.close()
+            return stats
+
+    stats = asyncio.run(call_from_within_a_running_loop())
+    store.close()
+    assert stats["chunks_inserted"] == 1
