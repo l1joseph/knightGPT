@@ -6,42 +6,82 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _fake_tool_call_response(tool_name: str, args: dict, call_id: str = "call_1"):
-    """Build a fake OpenAI ChatCompletion response requesting one tool call."""
-    message = MagicMock()
-    message.content = None
-    message.tool_calls = [
-        MagicMock(
-            id=call_id,
-            function=MagicMock(name=tool_name, arguments=json.dumps(args)),
-        )
-    ]
-    message.tool_calls[0].function.name = (
-        tool_name  # MagicMock(name=...) doesn't set .name the normal way
-    )
-    choice = MagicMock(message=message, finish_reason="tool_calls")
+def _content_chunk(text: str):
+    """Build one fake ChatCompletionChunk carrying a content fragment."""
+    delta = MagicMock(content=text, tool_calls=None)
+    choice = MagicMock(delta=delta, finish_reason=None)
+    return MagicMock(choices=[choice])
+
+
+def _tool_call_delta(
+    index: int, call_id: str | None, name: str | None, args_fragment: str
+):
+    function = MagicMock(name=None, arguments=args_fragment)
+    # MagicMock(name=...) doesn't set .name the normal way -- it's a
+    # reserved MagicMock constructor kwarg -- so assign it explicitly.
+    function.name = name
+    return MagicMock(index=index, id=call_id, function=function)
+
+
+def _tool_call_chunk(deltas: list):
+    """Build one fake ChatCompletionChunk carrying tool_call fragment(s)."""
+    delta = MagicMock(content=None, tool_calls=deltas)
+    choice = MagicMock(delta=delta, finish_reason=None)
     return MagicMock(choices=[choice])
 
 
 def _fake_final_answer_response(text: str):
-    message = MagicMock(content=text, tool_calls=None)
-    choice = MagicMock(message=message, finish_reason="stop")
-    return MagicMock(choices=[choice])
+    """Build a fake streaming response (list of chunks) for a plain final
+    answer, split across a few chunks so tests genuinely exercise
+    multi-chunk accumulation rather than a trivial one-chunk case."""
+    if not text:
+        return [_content_chunk("")]
+    third = max(1, len(text) // 3)
+    parts = [text[:third], text[third : 2 * third], text[2 * third :]]
+    parts = [p for p in parts if p]
+    return [_content_chunk(p) for p in parts]
+
+
+def _fake_tool_call_response(tool_name: str, args: dict, call_id: str = "call_1"):
+    """Build a fake streaming response (list of chunks) requesting one tool
+    call, with its function.arguments JSON split across 2+ chunks to
+    genuinely test fragment-concatenation."""
+    args_json = json.dumps(args)
+    mid = max(1, len(args_json) // 2)
+    first_fragment, second_fragment = args_json[:mid], args_json[mid:]
+
+    return [
+        _tool_call_chunk([_tool_call_delta(0, call_id, tool_name, first_fragment)]),
+        _tool_call_chunk([_tool_call_delta(0, None, None, second_fragment)]),
+    ]
 
 
 def _fake_multi_tool_call_response(calls: list[tuple[str, dict, str]]):
-    """Build a fake response requesting multiple tool calls in one round.
+    """Build a fake streaming response (list of chunks) requesting multiple
+    tool calls in one round, interleaved across chunks by index so
+    accumulation-by-index can be tested for cross-contamination.
 
     calls: list of (tool_name, args, call_id) tuples.
     """
-    tool_calls = []
-    for tool_name, args, call_id in calls:
-        tc = MagicMock(id=call_id, function=MagicMock(arguments=json.dumps(args)))
-        tc.function.name = tool_name
-        tool_calls.append(tc)
-    message = MagicMock(content=None, tool_calls=tool_calls)
-    choice = MagicMock(message=message, finish_reason="tool_calls")
-    return MagicMock(choices=[choice])
+    args_jsons = [json.dumps(args) for _, args, _ in calls]
+
+    # First chunk: announce id+name for every call, plus the first half of
+    # each call's arguments, interleaved by index.
+    first_chunk_deltas = []
+    second_chunk_deltas = []
+    for index, ((tool_name, _args, call_id), args_json) in enumerate(
+        zip(calls, args_jsons)
+    ):
+        mid = max(1, len(args_json) // 2)
+        first_chunk_deltas.append(
+            _tool_call_delta(index, call_id, tool_name, args_json[:mid])
+        )
+        second_chunk_deltas.append(_tool_call_delta(index, None, None, args_json[mid:]))
+
+    return [
+        _tool_call_chunk(first_chunk_deltas),
+        _tool_call_chunk(second_chunk_deltas),
+    ]
 
 
 @pytest.mark.unit
@@ -73,10 +113,17 @@ def test_run_emits_tool_call_then_tool_result_then_token_then_done(monkeypatch):
     ctx = orchestrator.run("test query", on_event=events.append, max_tool_rounds=5)
 
     event_types = [e["type"] for e in events]
-    assert event_types == ["tool_call", "tool_result", "token", "done"]
+    assert event_types == [
+        "tool_call",
+        "tool_result",
+        "token",
+        "token",
+        "token",
+        "done",
+    ]
     assert events[0]["tool_name"] == "fake_tool"
     assert events[1]["success"] is True
-    assert events[2]["content"] == "final answer text"
+    assert "".join(e["content"] for e in events[2:5]) == "final answer text"
     assert ctx.final_answer == "final answer text"
 
 
@@ -98,7 +145,45 @@ def test_run_with_no_tool_calls_emits_only_token_and_done(monkeypatch):
     events = []
     orchestrator.run("simple query", on_event=events.append)
 
-    assert [e["type"] for e in events] == ["token", "done"]
+    event_types = [e["type"] for e in events]
+    assert event_types[0] == "token"
+    assert event_types[-1] == "done"
+    assert all(t == "token" for t in event_types[:-1])
+
+
+@pytest.mark.unit
+def test_multiple_token_events_fire_during_a_multi_chunk_content_stream():
+    """The whole point of this change: content must stream out as multiple
+    small `token` events as chunks arrive, not accumulate silently and
+    fire once at the end."""
+    from src.agents.orchestrator import AgentOrchestrator
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        [
+            _content_chunk("Hello "),
+            _content_chunk("streaming "),
+            _content_chunk("world"),
+        ],
+    ]
+
+    events = []
+    ctx = orchestrator.run("simple query", on_event=events.append)
+
+    token_events = [e for e in events if e["type"] == "token"]
+    assert len(token_events) == 3
+    assert [e["content"] for e in token_events] == [
+        "Hello ",
+        "streaming ",
+        "world",
+    ]
+    assert ctx.final_answer == "Hello streaming world"
+    # Not re-emitted whole as one more event after the per-chunk ones.
+    assert events[-1]["type"] == "done"
 
 
 @pytest.mark.unit
@@ -136,21 +221,29 @@ def test_run_stops_at_max_tool_rounds():
         -1
     ].kwargs
     assert "tools" not in forced_call_kwargs or forced_call_kwargs["tools"] is None
+    # And every call, including the forced one, must stream.
+    for call in orchestrator.client.chat.completions.create.call_args_list:
+        assert call.kwargs["stream"] is True
 
 
 @pytest.mark.unit
 def test_simultaneous_tool_calls_get_distinct_indices():
     """Two tool calls requested in the same round must each carry their own
     position among that round's calls, so the SSE adapter can put them on
-    distinct tool_calls[i] slots instead of colliding on slot 0."""
+    distinct tool_calls[i] slots instead of colliding on slot 0. Their
+    id/name/arguments fragments arrive interleaved across chunks and must
+    not cross-contaminate between indices."""
     from src.agents.orchestrator import AgentOrchestrator
     from src.tools.base import BaseTool, ToolResult
+
+    captured_args = []
 
     class FakeTool(BaseTool):
         name = "fake_tool"
         description = "fake"
 
         def execute(self, query: str, **kwargs) -> ToolResult:
+            captured_args.append(query)
             return ToolResult(tool_name=self.name, success=True, data="output")
 
     orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
@@ -174,6 +267,8 @@ def test_simultaneous_tool_calls_get_distinct_indices():
     tool_call_events = [e for e in events if e["type"] == "tool_call"]
     assert [e["index"] for e in tool_call_events] == [0, 1]
     assert [e["call_id"] for e in tool_call_events] == ["call_0", "call_1"]
+    assert [e["args"]["query"] for e in tool_call_events] == ["a", "b"]
+    assert captured_args == ["a", "b"]
 
 
 @pytest.mark.unit
@@ -200,12 +295,8 @@ def test_non_dict_tool_arguments_default_to_empty_dict():
     orchestrator.tools = {"fake_tool": FakeTool()}
     orchestrator.client = MagicMock()
     orchestrator.model = "qwen3"
-    tc = MagicMock(id="call_1", function=MagicMock(arguments="null"))
-    tc.function.name = "fake_tool"
-    message = MagicMock(content=None, tool_calls=[tc])
-    choice = MagicMock(message=message, finish_reason="tool_calls")
     orchestrator.client.chat.completions.create.side_effect = [
-        MagicMock(choices=[choice]),
+        [_tool_call_chunk([_tool_call_delta(0, "call_1", "fake_tool", "null")])],
         _fake_final_answer_response("final answer"),
     ]
 
@@ -260,6 +351,7 @@ def test_temperature_and_max_tokens_are_passed_to_llm_calls():
     call_kwargs = orchestrator.client.chat.completions.create.call_args_list[0].kwargs
     assert call_kwargs["temperature"] == 0.9
     assert call_kwargs["max_tokens"] == 512
+    assert call_kwargs["stream"] is True
 
 
 @pytest.mark.unit

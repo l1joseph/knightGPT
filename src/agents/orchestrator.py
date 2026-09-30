@@ -13,6 +13,7 @@ format, which stays in src/api/sse_adapter.py.
 
 import json
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from openai import OpenAI
@@ -141,13 +142,15 @@ class AgentOrchestrator:
 
         for _round_num in range(max_tool_rounds):
             try:
-                response = self.client.chat.completions.create(
+                stream = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     tools=tool_schemas,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    stream=True,
                 )
+                content, tool_calls = self._consume_stream(stream, emit)
             except Exception as e:
                 logger.error(f"LLM call failed: {e}")
                 ctx.final_answer = f"The language model request failed: {e}"
@@ -155,20 +158,17 @@ class AgentOrchestrator:
                 emit({"type": "done"})
                 return ctx
 
-            choice = response.choices[0]
-            tool_calls = getattr(choice.message, "tool_calls", None)
-
             if not tool_calls:
-                answer = choice.message.content or ""
-                ctx.final_answer = answer
-                emit({"type": "token", "content": answer})
+                # content was already streamed out token-by-token above --
+                # don't re-emit it as one more giant token event.
+                ctx.final_answer = content
                 emit({"type": "done"})
                 return ctx
 
             messages.append(
                 {
                     "role": "assistant",
-                    "content": choice.message.content,
+                    "content": content or None,
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -236,7 +236,7 @@ class AgentOrchestrator:
         # max_tool_rounds exhausted without a final answer -- force one,
         # with no tools offered so the model cannot request yet another round.
         try:
-            response = self.client.chat.completions.create(
+            stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages
                 + [
@@ -247,7 +247,9 @@ class AgentOrchestrator:
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
+                stream=True,
             )
+            content, _tool_calls = self._consume_stream(stream, emit)
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             ctx.final_answer = f"The language model request failed: {e}"
@@ -255,11 +257,93 @@ class AgentOrchestrator:
             emit({"type": "done"})
             return ctx
 
-        answer = response.choices[0].message.content or ""
-        ctx.final_answer = answer
-        emit({"type": "token", "content": answer})
+        # No tools= was offered on this call, so content (already streamed
+        # out token-by-token above) is necessarily the final answer.
+        ctx.final_answer = content
         emit({"type": "done"})
         return ctx
+
+    def _consume_stream(
+        self,
+        stream: Any,
+        emit: Callable[[dict[str, Any]], None],
+    ) -> tuple[str, list[SimpleNamespace] | None]:
+        """Iterate a `stream=True` chat.completions.create() response.
+
+        Emits a `token` event for each content fragment AS IT ARRIVES (real
+        token-by-token streaming), and accumulates any tool-call fragments
+        (keyed by their `index`, since multiple tool calls can stream in
+        parallel) into complete tool-call records. A given streaming turn
+        is either content-only or tool-calls-only in practice, never mixed.
+
+        Tool-call `function.arguments` fragments are concatenated as plain
+        strings and are NEVER parsed as JSON here -- only the caller, after
+        the stream has fully ended, should attempt json.loads() on the
+        concatenated result. Parsing a partial fragment mid-stream would
+        blow up on every turn since the JSON is only valid once complete.
+
+        Returns:
+            (content, tool_calls) where content is the full accumulated
+            answer text (already emitted piecemeal via on_event) and
+            tool_calls is None if no tool-call fragments were seen, or a
+            list of SimpleNamespace objects -- ordered by index -- shaped
+            like the OpenAI SDK's ChatCompletionMessageToolCall (`.id`,
+            `.function.name`, `.function.arguments`) so existing
+            downstream code that reads those via attribute access keeps
+            working unchanged.
+        """
+        content_parts: list[str] = []
+        tool_call_frags: dict[int, dict[str, str | None]] = {}
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if delta_tool_calls:
+                for tc_delta in delta_tool_calls:
+                    frag = tool_call_frags.setdefault(
+                        tc_delta.index,
+                        {"id": None, "name": None, "arguments": ""},
+                    )
+                    if tc_delta.id:
+                        frag["id"] = tc_delta.id
+                    function = getattr(tc_delta, "function", None)
+                    if function is not None:
+                        if function.name:
+                            frag["name"] = function.name
+                        if function.arguments:
+                            frag["arguments"] += function.arguments
+                # No `continue` here: a chunk is not guaranteed to carry
+                # only one of content/tool_calls. In practice a turn is
+                # either content-only or tool-calls-only, so this branch
+                # and the content check below are usually mutually
+                # exclusive per chunk anyway -- but checking both costs
+                # nothing and means a chunk that happens to carry both
+                # (e.g. a model emitting a short preamble alongside a tool
+                # call) never silently loses its content fragment.
+
+            content_fragment = getattr(delta, "content", None)
+            if content_fragment:
+                content_parts.append(content_fragment)
+                emit({"type": "token", "content": content_fragment})
+
+        content = "".join(content_parts)
+
+        if not tool_call_frags:
+            return content, None
+
+        tool_calls = [
+            SimpleNamespace(
+                id=frag["id"],
+                function=SimpleNamespace(
+                    name=frag["name"], arguments=frag["arguments"]
+                ),
+            )
+            for _, frag in sorted(tool_call_frags.items())
+        ]
+        return content, tool_calls
 
     def _retrieve_rag_context(self, query: str, top_k: int) -> str:
         if not self.retriever:
