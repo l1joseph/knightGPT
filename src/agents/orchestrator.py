@@ -315,7 +315,14 @@ class AgentOrchestrator:
                             frag["name"] = function.name
                         if function.arguments:
                             frag["arguments"] += function.arguments
-                continue
+                # No `continue` here: a chunk is not guaranteed to carry
+                # only one of content/tool_calls. In practice a turn is
+                # either content-only or tool-calls-only, so this branch
+                # and the content check below are usually mutually
+                # exclusive per chunk anyway -- but checking both costs
+                # nothing and means a chunk that happens to carry both
+                # (e.g. a model emitting a short preamble alongside a tool
+                # call) never silently loses its content fragment.
 
             content_fragment = getattr(delta, "content", None)
             if content_fragment:
