@@ -41,6 +41,20 @@ services:
       - API_API_KEY=${API_API_KEY:-}
     volumes:
       - ../data:/app/data:ro
+      # ingest_paper (src/tools/ingest_paper.py) downloads new papers'
+      # PDFs/markdown at runtime, via the live API process -- something
+      # nothing needed before it existed. ../data is deliberately
+      # read-only above (same reason duckdb-data below is its own
+      # volume: protects whatever was pre-populated there from being
+      # mutated by a bug in the running container). These two volumes
+      # overlay just the subdirectories that now need write access,
+      # mounted at a more specific path than the read-only parent mount
+      # so Docker gives them precedence for those two subpaths only --
+      # confirmed live on kl-remote that without this, ingest_paper
+      # failed with "[Errno 30] Read-only file system: 'data/raw_pdfs'"
+      # the first time it tried to actually download a paper.
+      - raw-pdfs-data:/app/data/raw_pdfs
+      - markdown-data:/app/data/markdown
       - duckdb-data:/app/duckdb_data
       - api-logs:/app/logs
     healthcheck:
@@ -143,6 +157,8 @@ volumes:
   api-logs:
   open-webui-data:
   duckdb-data:
+  raw-pdfs-data:
+  markdown-data:
   pgdata:
 
 networks:
