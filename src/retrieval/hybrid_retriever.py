@@ -43,6 +43,21 @@ def _row_to_chunk(row: asyncpg.Record) -> Chunk:
     )
 
 
+def resolve_collection_id(collection_id: str | None) -> str:
+    """Translate RequestContext.collection_id's Python-level None (the
+    natural idiom for "no collection attached") into the literal string
+    'global' -- the database-layer sentinel every collection_id column
+    and the graph.tenant_setting GUC actually use. This is the ONE place
+    in the whole feature this translation happens: retrieve() and
+    insert_paper() below both call this before collection_id ever reaches
+    a query parameter, a GUC, or DuckDBStore -- none of which ever see
+    Python None. NULL = anything is never true in SQL (not even
+    NULL = NULL), so a NULL-for-global design would make every global
+    row permanently, silently unreachable through pgGraph's tenant_column
+    scoping -- see the spec's Components section."""
+    return collection_id if collection_id is not None else "global"
+
+
 class HybridRetriever(BaseRetriever):
     """
     Hybrid Postgres+DuckDB RAG retriever.
@@ -97,8 +112,13 @@ class HybridRetriever(BaseRetriever):
         query: str,
         top_k: Optional[int] = None,
         expand_context: bool = True,
+        collection_id: Optional[str] = None,
     ) -> RetrievalResult:
-        return self._run(self._retrieve_async(query, top_k, expand_context))
+        return self._run(
+            self._retrieve_async(
+                query, top_k, expand_context, resolve_collection_id(collection_id)
+            )
+        )
 
     def insert_paper(
         self,
@@ -173,6 +193,7 @@ class HybridRetriever(BaseRetriever):
         query: str,
         top_k: Optional[int],
         expand_context: bool,
+        collection_id: str,
     ) -> RetrievalResult:
         if not query or not query.strip():
             logger.warning("Empty or invalid query provided")
@@ -186,87 +207,106 @@ class HybridRetriever(BaseRetriever):
             logger.error(f"Embedding generation failed: {e}")
             return RetrievalResult(chunks=[], query_embedding=[], similarity_scores=[])
 
-        neighbor_pairs = self.duckdb_store.search(query_embedding, top_k=top_k)
+        neighbor_pairs = self.duckdb_store.search(
+            query_embedding, top_k=top_k, collection_id=collection_id
+        )
         ordered_ids = [nid for nid, _ in neighbor_pairs]
         score_by_id = dict(neighbor_pairs)
 
         pool = self._pool
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, paper_doi, text, section, token_count
-                FROM chunks
-                WHERE id = ANY($1::text[])
-                """,
-                ordered_ids,
-            )
-            rows_by_id = {r["id"]: r for r in rows}
-
-            chunks = [
-                _row_to_chunk(rows_by_id[nid])
-                for nid in ordered_ids
-                if nid in rows_by_id
-            ]
-            scores = [score_by_id[c.id] for c in chunks]
-
-            if expand_context and self.graph_hops > 0 and chunks:
-                neighbor_ids = set()
-                for chunk in chunks:
-                    expand_rows = await conn.fetch(
-                        """
-                        SELECT node_id
-                        FROM graph.expand(
-                            'public.chunks'::regclass,
-                            $1,
-                            max_depth := $2,
-                            target_table := 'public.chunks'::regclass,
-                            include_start := false
-                        )
-                        """,
-                        chunk.id,
-                        self.graph_hops,
-                    )
-                    neighbor_ids.update(r["node_id"] for r in expand_rows)
-
-                existing_ids = {c.id for c in chunks}
-                new_ids = neighbor_ids - existing_ids
-                if new_ids:
-                    neighbor_rows = await conn.fetch(
-                        """
-                        SELECT id, paper_doi, text, section, token_count
-                        FROM chunks
-                        WHERE id = ANY($1::text[])
-                        """,
-                        list(new_ids),
-                    )
-                    neighbor_embeddings = self.duckdb_store.get_embeddings(
-                        list(new_ids)
-                    )
-                    query_vec = query_embedding
-
-                    def _cosine_similarity(a: list[float], b: list[float]) -> float:
-                        dot = sum(x * y for x, y in zip(a, b))
-                        norm_a = sum(x * x for x in a) ** 0.5
-                        norm_b = sum(y * y for y in b) ** 0.5
-                        if norm_a == 0 or norm_b == 0:
-                            return 0.0
-                        return dot / (norm_a * norm_b)
-
-                    for r in neighbor_rows:
-                        chunks.append(_row_to_chunk(r))
-                        neighbor_embedding = neighbor_embeddings.get(r["id"])
-                        score = (
-                            _cosine_similarity(query_vec, neighbor_embedding)
-                            if neighbor_embedding
-                            else 0.0
-                        )
-                        scores.append(score)
-
-                sorted_pairs = sorted(
-                    zip(chunks, scores), key=lambda x: x[1], reverse=True
+            # Explicit transaction wrapping the whole read: pgGraph's
+            # tenant scoping is a session GUC (graph.tenant_setting, read
+            # by graph.enforce_tenant_scope -- see the spec's Decisions
+            # section), set here via the parameterized set_config(...,
+            # true) form -- the SET LOCAL-equivalent that resets
+            # automatically at transaction end regardless of
+            # commit/rollback. A bare SET (session-scoped) would leak
+            # across requests sharing this pooled connection -- treated
+            # as a bug, not a runtime fallback, per the spec's Error
+            # Handling section.
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT set_config('graph.tenant_setting', $1, $2)",
+                    collection_id,
+                    True,
                 )
-                chunks = [c for c, _ in sorted_pairs]
-                scores = [s for _, s in sorted_pairs]
+
+                rows = await conn.fetch(
+                    """
+                    SELECT id, paper_doi, text, section, token_count
+                    FROM chunks
+                    WHERE id = ANY($1::text[])
+                    """,
+                    ordered_ids,
+                )
+                rows_by_id = {r["id"]: r for r in rows}
+
+                chunks = [
+                    _row_to_chunk(rows_by_id[nid])
+                    for nid in ordered_ids
+                    if nid in rows_by_id
+                ]
+                scores = [score_by_id[c.id] for c in chunks]
+
+                if expand_context and self.graph_hops > 0 and chunks:
+                    neighbor_ids = set()
+                    for chunk in chunks:
+                        expand_rows = await conn.fetch(
+                            """
+                            SELECT node_id
+                            FROM graph.expand(
+                                'public.chunks'::regclass,
+                                $1,
+                                max_depth := $2,
+                                target_table := 'public.chunks'::regclass,
+                                include_start := false
+                            )
+                            """,
+                            chunk.id,
+                            self.graph_hops,
+                        )
+                        neighbor_ids.update(r["node_id"] for r in expand_rows)
+
+                    existing_ids = {c.id for c in chunks}
+                    new_ids = neighbor_ids - existing_ids
+                    if new_ids:
+                        neighbor_rows = await conn.fetch(
+                            """
+                            SELECT id, paper_doi, text, section, token_count
+                            FROM chunks
+                            WHERE id = ANY($1::text[])
+                            """,
+                            list(new_ids),
+                        )
+                        neighbor_embeddings = self.duckdb_store.get_embeddings(
+                            list(new_ids)
+                        )
+                        query_vec = query_embedding
+
+                        def _cosine_similarity(a: list[float], b: list[float]) -> float:
+                            dot = sum(x * y for x, y in zip(a, b))
+                            norm_a = sum(x * x for x in a) ** 0.5
+                            norm_b = sum(y * y for y in b) ** 0.5
+                            if norm_a == 0 or norm_b == 0:
+                                return 0.0
+                            return dot / (norm_a * norm_b)
+
+                        for r in neighbor_rows:
+                            chunks.append(_row_to_chunk(r))
+                            neighbor_embedding = neighbor_embeddings.get(r["id"])
+                            score = (
+                                _cosine_similarity(query_vec, neighbor_embedding)
+                                if neighbor_embedding
+                                else 0.0
+                            )
+                            scores.append(score)
+
+                    sorted_pairs = sorted(
+                        zip(chunks, scores), key=lambda x: x[1], reverse=True
+                    )
+                    chunks = [c for c, _ in sorted_pairs]
+                    scores = [s for _, s in sorted_pairs]
 
         return RetrievalResult(
             chunks=chunks,

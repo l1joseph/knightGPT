@@ -15,6 +15,19 @@ def make_mock_pool(fetch_side_effects):
     conn = AsyncMock()
     conn.fetch.side_effect = fetch_side_effects
 
+    # conn.transaction() must return a plain (non-coroutine) async context
+    # manager -- a bare AsyncMock's child attributes are themselves
+    # AsyncMock, so an unconfigured `conn.transaction()` returns a
+    # coroutine object rather than something usable in `async with`. Every
+    # retrieve() test goes through retrieve()'s transaction block
+    # regardless of whether that particular test cares about it, so this
+    # helper configures it unconditionally (same pattern as
+    # make_mock_pool_for_insert below).
+    transaction_cm = MagicMock()
+    transaction_cm.__aenter__ = AsyncMock(return_value=None)
+    transaction_cm.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=transaction_cm)
+
     acquire_cm = MagicMock()
     acquire_cm.__aenter__ = AsyncMock(return_value=conn)
     acquire_cm.__aexit__ = AsyncMock(return_value=False)
@@ -325,3 +338,168 @@ def test_insert_paper_callable_from_inside_a_running_event_loop(tmp_path):
     stats = asyncio.run(call_from_within_a_running_loop())
     store.close()
     assert stats["chunks_inserted"] == 1
+
+
+@pytest.mark.unit
+def test_resolve_collection_id_translates_none_to_global_string():
+    """Explicit regression test for the None-to-'global' translation: the
+    literal string 'global' (never Python None, never SQL NULL) is what a
+    None collection_id resolves to -- the exact boundary a later
+    'simplification' could silently reintroduce as a nullable column."""
+    from src.retrieval.hybrid_retriever import resolve_collection_id
+
+    resolved = resolve_collection_id(None)
+    assert resolved == "global"
+    assert resolved is not None
+    assert isinstance(resolved, str)
+
+
+@pytest.mark.unit
+def test_resolve_collection_id_passes_through_explicit_value():
+    from src.retrieval.hybrid_retriever import resolve_collection_id
+
+    assert resolve_collection_id("know-123") == "know-123"
+
+
+@pytest.mark.unit
+def test_retrieve_passes_resolved_global_string_to_duckdb_search_when_none(tmp_path):
+    """retrieve(collection_id=None) must reach DuckDBStore.search() with
+    the literal string 'global', never None -- DuckDBStore.search()'s own
+    collection_id parameter is a plain str (Task 3), so passing Python
+    None through would raise or silently mismatch rather than match the
+    'global' sentinel rows."""
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    captured = {}
+    original_search = store.search
+
+    def spy_search(query_embedding, top_k, collection_id="global"):
+        captured["collection_id"] = collection_id
+        return original_search(query_embedding, top_k, collection_id)
+
+    store.search = spy_search
+    pool, conn = make_mock_pool([[]])
+    embedder = MagicMock()
+    embedder.embed_text.return_value = [1.0, 0.0, 0.0, 0.0]
+
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        retriever.retrieve("query", expand_context=False, collection_id=None)
+        retriever.close()
+    store.close()
+
+    assert captured["collection_id"] == "global"
+
+
+@pytest.mark.unit
+def test_retrieve_passes_explicit_collection_id_to_duckdb_search(tmp_path):
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    captured = {}
+    original_search = store.search
+
+    def spy_search(query_embedding, top_k, collection_id="global"):
+        captured["collection_id"] = collection_id
+        return original_search(query_embedding, top_k, collection_id)
+
+    store.search = spy_search
+    pool, conn = make_mock_pool([[]])
+    embedder = MagicMock()
+    embedder.embed_text.return_value = [1.0, 0.0, 0.0, 0.0]
+
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        retriever.retrieve("query", expand_context=False, collection_id="know-123")
+        retriever.close()
+    store.close()
+
+    assert captured["collection_id"] == "know-123"
+
+
+@pytest.mark.unit
+def test_retrieve_sets_graph_tenant_setting_guc_before_graph_expand(tmp_path):
+    """The pgGraph expand() call must run inside a transaction whose first
+    statement sets the graph.tenant_setting GUC via the parameterized
+    set_config(..., true) form (the SET LOCAL-equivalent) -- not a bare
+    SET, and not skipped entirely. conn.transaction() must wrap the whole
+    read so the GUC is guaranteed to reset at transaction end regardless
+    of what happens next on this pooled connection."""
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings(
+        [("c1", [1.0, 0.0, 0.0, 0.0]), ("neighbor1", [0.8, 0.2, 0.0, 0.0])],
+        collection_id="know-123",
+    )
+    store.ensure_index()
+
+    chunk_rows = [
+        {
+            "id": "c1",
+            "paper_doi": "10.1/x",
+            "text": "chunk one",
+            "section": "Intro",
+            "token_count": 5,
+        },
+    ]
+    expand_rows = [{"node_id": "neighbor1"}]
+    neighbor_chunk_rows = [
+        {
+            "id": "neighbor1",
+            "paper_doi": "10.1/x",
+            "text": "chunk two",
+            "section": "Methods",
+            "token_count": 6,
+        },
+    ]
+
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value=None)
+    conn.fetch = AsyncMock(side_effect=[chunk_rows, expand_rows, neighbor_chunk_rows])
+    transaction_cm = MagicMock()
+    transaction_cm.__aenter__ = AsyncMock(return_value=None)
+    transaction_cm.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=transaction_cm)
+    acquire_cm = MagicMock()
+    acquire_cm.__aenter__ = AsyncMock(return_value=conn)
+    acquire_cm.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.acquire.return_value = acquire_cm
+    pool.close = AsyncMock()
+
+    embedder = MagicMock()
+    embedder.embed_text.return_value = [1.0, 0.0, 0.0, 0.0]
+
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test",
+            duckdb_store=store,
+            embedder=embedder,
+            top_k=1,
+            graph_hops=1,
+        )
+        retriever.retrieve("query", expand_context=True, collection_id="know-123")
+        retriever.close()
+    store.close()
+
+    conn.transaction.assert_called_once()
+    first_execute_call = conn.execute.call_args_list[0]
+    assert "set_config" in first_execute_call.args[0]
+    assert "graph.tenant_setting" in first_execute_call.args[0]
+    assert first_execute_call.args[1] == "know-123"
+    assert first_execute_call.args[2] is True
