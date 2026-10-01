@@ -2,7 +2,10 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..api.request_context import RequestContext
 
 
 @dataclass
@@ -32,8 +35,20 @@ class BaseTool(ABC):
     description: str = "Base tool"
 
     @abstractmethod
-    def execute(self, query: str, **kwargs) -> ToolResult:
-        """Execute the tool with the given query."""
+    def execute(
+        self,
+        query: str,
+        *,
+        request_context: "RequestContext | None" = None,
+        **kwargs,
+    ) -> ToolResult:
+        """Execute the tool with the given query.
+
+        request_context is injected by AgentOrchestrator.run()'s dispatch
+        loop -- never parsed from the model's JSON tool-call arguments
+        (see src/agents/orchestrator.py). Most tools ignore it entirely
+        via **kwargs; only ingest_paper and search_corpus read it.
+        """
         ...
 
     @property
