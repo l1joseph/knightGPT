@@ -25,6 +25,7 @@ from ..tools.openalex import OpenAlexTool
 from ..tools.kegg import KEGGTool
 from ..tools.qiime2 import QIIME2Tool
 from ..tools.ingest_paper import IngestPaperTool
+from ..tools.search_corpus import SearchCorpusTool
 from ..utils import get_logger, get_settings
 
 logger = get_logger(__name__)
@@ -74,6 +75,7 @@ class AgentOrchestrator:
             "kegg_lookup": KEGGTool(),
             "qiime2_docs": QIIME2Tool(),
             "ingest_paper": IngestPaperTool(retriever=retriever),
+            "search_corpus": SearchCorpusTool(retriever=retriever),
         }
 
         self.client = OpenAI(
