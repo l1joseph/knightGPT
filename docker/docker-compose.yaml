@@ -27,6 +27,18 @@ services:
       # read-only ../data mount below, so it gets its own read-write
       # volume instead.
       - INGEST_DUCKDB_PATH=/app/duckdb_data/embeddings.duckdb
+      # ingest_paper (src/tools/ingest_paper.py) downloads new papers'
+      # PDFs/markdown at runtime -- same read-write problem as DuckDB
+      # above, with the same fix (a sibling volume, not nested under
+      # ../data). Confirmed live on kl-remote that nesting a volume at
+      # /app/data/raw_pdfs (inside the read-only ../data bind mount)
+      # fails outright: Docker can't create a mountpoint directory
+      # inside an already-read-only bind mount ("read-only file system"
+      # at container create time, not merely at write time) -- the
+      # duckdb-data precedent above only works because /app/duckdb_data
+      # was never nested under the ../data mount in the first place.
+      - INGEST_RAW_PDF_DIR=/app/raw_pdfs_data
+      - INGEST_MARKDOWN_DIR=/app/markdown_data
       - LOG_LEVEL=INFO
       # Shared secret required in an "Authorization: Bearer <key>" header on
       # /api/v1/chat, /api/v1/agent/chat, /api/v1/search, and
@@ -42,19 +54,15 @@ services:
     volumes:
       - ../data:/app/data:ro
       # ingest_paper (src/tools/ingest_paper.py) downloads new papers'
-      # PDFs/markdown at runtime, via the live API process -- something
-      # nothing needed before it existed. ../data is deliberately
-      # read-only above (same reason duckdb-data below is its own
-      # volume: protects whatever was pre-populated there from being
-      # mutated by a bug in the running container). These two volumes
-      # overlay just the subdirectories that now need write access,
-      # mounted at a more specific path than the read-only parent mount
-      # so Docker gives them precedence for those two subpaths only --
-      # confirmed live on kl-remote that without this, ingest_paper
-      # failed with "[Errno 30] Read-only file system: 'data/raw_pdfs'"
-      # the first time it tried to actually download a paper.
-      - raw-pdfs-data:/app/data/raw_pdfs
-      - markdown-data:/app/data/markdown
+      # PDFs/markdown at runtime -- these two volumes are its read-write
+      # equivalent of duckdb-data below. Deliberately NOT nested under
+      # /app/data (which is read-only above, to protect whatever was
+      # pre-populated there): see INGEST_RAW_PDF_DIR/INGEST_MARKDOWN_DIR
+      # above, which redirect settings.ingestion away from the default
+      # data/raw_pdfs, data/markdown paths to these sibling volumes
+      # instead.
+      - raw-pdfs-data:/app/raw_pdfs_data
+      - markdown-data:/app/markdown_data
       - duckdb-data:/app/duckdb_data
       - api-logs:/app/logs
     healthcheck:

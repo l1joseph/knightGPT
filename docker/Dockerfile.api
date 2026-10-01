@@ -45,13 +45,18 @@ COPY src/ ./src/
 # because they run against the full repo checkout, not this image.
 COPY scripts/ ./scripts/
 
-# Create data directories, including duckdb_data -- it's only ever
-# referenced via docker-compose.yaml's volume mount (INGEST_DUCKDB_PATH),
-# never created here otherwise, so a fresh named volume mounted over it
-# would get created with root ownership and be unwritable by appuser
-# below. Pre-creating it here means Docker propagates *this* directory's
-# ownership to a new empty volume on first mount instead.
-RUN mkdir -p data/raw_pdfs data/markdown data/processed duckdb_data logs && \
+# Create data directories, including duckdb_data, raw_pdfs_data, and
+# markdown_data -- each is only ever referenced via docker-compose.yaml's
+# volume mounts (INGEST_DUCKDB_PATH / INGEST_RAW_PDF_DIR /
+# INGEST_MARKDOWN_DIR point at them), never created here otherwise, so a
+# fresh named volume mounted over any of them would get created with root
+# ownership and be unwritable by appuser below. Pre-creating them here
+# means Docker propagates *this* directory's ownership to a new empty
+# volume on first mount instead. raw_pdfs_data/markdown_data are siblings
+# of data/, not nested under it -- data/ is a read-only bind mount in
+# docker-compose.yaml, and Docker can't create a mountpoint for a
+# writable volume inside an already read-only one.
+RUN mkdir -p data/processed raw_pdfs_data markdown_data duckdb_data logs && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
