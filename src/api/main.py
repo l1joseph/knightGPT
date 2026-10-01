@@ -22,6 +22,7 @@ from ..ingestion import (
 from ..ingestion.doi_resolver import build_doi_lookup, resolve_doi
 from ..retrieval import HybridRetriever, RAGEngine
 from ..utils import get_logger, get_pg_pool, get_settings
+from .request_context import build_request_context
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -612,10 +613,24 @@ class AgentChatRequest(BaseModel):
 
     message: str = Field(..., description="User message")
     top_k: int = Field(default=5, description="RAG retrieval depth")
+    files: Optional[list[dict]] = Field(
+        default=None,
+        description=(
+            "OpenAI/Open-WebUI-style attached-files array; a "
+            '{"type": "collection", "id": ...} entry selects which '
+            "Knowledge collection this request is scoped to -- same "
+            "convention as /v1/chat/completions. Optional, for parity "
+            "with that endpoint."
+        ),
+    )
 
 
 @app.post("/api/v1/agent/chat")
-async def agent_chat(request: AgentChatRequest, _: None = Depends(verify_api_key)):
+async def agent_chat(
+    request: AgentChatRequest,
+    http_request: Request,
+    _: None = Depends(verify_api_key),
+):
     """
     Multi-agent RAG chat with tool use.
 
@@ -624,13 +639,19 @@ async def agent_chat(request: AgentChatRequest, _: None = Depends(verify_api_key
     a final answer or the tool-round safety cap is hit.
     """
     orchestrator = get_orchestrator()
+    request_context = build_request_context(
+        http_request.headers, request.model_dump(), settings.api.admin_email_set
+    )
 
     # orchestrator.run() makes blocking OpenAI client calls and can loop up
     # to max_tool_rounds sequential round-trips -- offloaded to a worker
     # thread so it doesn't stall the event loop for every other concurrent
     # request, matching how /v1/chat/completions already handles this.
     result = await run_in_threadpool(
-        orchestrator.run, request.message, top_k=request.top_k
+        orchestrator.run,
+        request.message,
+        top_k=request.top_k,
+        request_context=request_context,
     )
 
     return {
@@ -724,6 +745,9 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
     stream = data.get("stream", False)
     temperature = data.get("temperature", 0.3)
     max_tokens = data.get("max_tokens", 2000)
+    request_context = build_request_context(
+        request.headers, data, settings.api.admin_email_set
+    )
 
     user_message, history = _split_latest_user_message(messages)
 
@@ -752,6 +776,7 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
                         temperature=temperature,
                         max_tokens=max_tokens,
                         history=history,
+                        request_context=request_context,
                     )
                 finally:
                     event_queue.put(SENTINEL)
@@ -780,6 +805,7 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
         temperature=temperature,
         max_tokens=max_tokens,
         history=history,
+        request_context=request_context,
     )
 
     return {
