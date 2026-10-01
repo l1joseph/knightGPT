@@ -21,7 +21,7 @@ import os
 import asyncpg
 import pytest
 
-from scripts.apply_schema import apply_schema
+from scripts.apply_schema import _registration_contains, apply_schema
 
 DSN = os.environ.get(
     "TEST_POSTGRES_DSN", "postgresql://postgres:password@localhost:5432/knightgpt"
@@ -130,6 +130,40 @@ async def test_duckdb_and_pggraph_both_isolate_collections_from_each_other(tmp_p
                 doi="10.1/a2", chunks=[chunk_a2], collection_id="collection-a"
             )
 
+            # The app's own write path (build_edges_for_chunk) scopes its
+            # neighbor-candidate search to collection_id, so chunk_edges can
+            # NEVER contain a cross-collection row through normal insertion
+            # -- meaning expand() assertions that only ever exercise
+            # app-inserted edges would pass identically whether pgGraph's
+            # OWN read-time tenant_column enforcement works or is entirely
+            # absent. To actually test THAT (independent of write-time
+            # scoping), manually insert a chunk_edges row directly via raw
+            # SQL connecting a chunk in collection-a to a chunk in
+            # collection-b -- a row that should be structurally impossible
+            # to create through insert_paper()/build_edges_for_chunk, but
+            # which we force into existence here to prove graph.expand()
+            # itself refuses to traverse across collections even when a
+            # real edge row says it can.
+            await conn.execute(
+                """
+                INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity, collection_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
+                """,
+                "chunk-a",
+                "chunk-b",
+                0.99,
+                "collection-a",
+            )
+            # Rebuild pgGraph's CSR projection so this manually-inserted
+            # edge is reflected in the structure fresh connections sync
+            # from (see src/utils/db.py:sync_graph_on_connect's docstring
+            # -- the graph projection lives in each connection's private
+            # memory and only picks up new rows via graph.build() +
+            # apply_sync()), matching the same follow-up call
+            # insert_chunks() itself makes after writing real edges.
+            await conn.execute("SELECT * FROM graph.build()")
+
             retriever2 = HybridRetriever(
                 dsn=DSN, duckdb_store=duckdb_store, top_k=1, graph_hops=1
             )
@@ -142,9 +176,23 @@ async def test_duckdb_and_pggraph_both_isolate_collections_from_each_other(tmp_p
                 expanded_b = retriever2.retrieve(
                     "query", collection_id="collection-b", expand_context=True
                 )
-                assert {c.id for c in expanded_a.chunks} <= {"chunk-a", "chunk-a2"}
-                assert "chunk-b" not in {c.id for c in expanded_a.chunks}
-                assert "chunk-g" not in {c.id for c in expanded_a.chunks}
+                expanded_a_ids = {c.id for c in expanded_a.chunks}
+                # Exact equality, not a subset check: this fails loudly if
+                # either (a) the legitimate same-collection neighbor
+                # chunk-a2 is wrongly missing -- graph expansion silently
+                # stopped traversing valid same-collection edges -- or (b)
+                # chunk-b leaks in via the manually-inserted cross-collection
+                # edge above, proving pgGraph's own tenant_column read-time
+                # enforcement actually blocks it rather than the test
+                # vacuously passing because no cross-collection edge ever
+                # existed to wrongly traverse.
+                assert expanded_a_ids == {"chunk-a", "chunk-a2"}
+                assert "chunk-b" not in expanded_a_ids
+                assert "chunk-g" not in expanded_a_ids
+                # The manually-inserted edge is bidirectional (add_edge's
+                # similar_to relationship is bidirectional := true), so
+                # this also checks the reverse direction: expanding from
+                # chunk-b must not leak chunk-a back in either.
                 assert {c.id for c in expanded_b.chunks} == {"chunk-b"}
             finally:
                 retriever2.close()
@@ -155,5 +203,118 @@ async def test_duckdb_and_pggraph_both_isolate_collections_from_each_other(tmp_p
         # Cleanup: leave the database in the state apply_schema() left it
         # (empty tables), regardless of pass/fail, so repeated runs of
         # this test against the same Postgres instance stay idempotent.
+        await conn.execute("TRUNCATE chunk_edges, chunks, papers CASCADE")
+        await conn.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_apply_schema_upgrade_path_adds_tenant_column_to_existing_registration():
+    """Regression test for the Task 2 carried-forward finding: kl-remote's
+    LIVE public.chunks table was already registered with pgGraph via
+    graph.add_table() WITHOUT a tenant_column, from before this
+    per-collection feature existed (see git history for sql/schema.sql --
+    commit 783a82b added `tenant_column := 'collection_id'` to a
+    graph.add_table() call that previously omitted it entirely). The
+    fresh-install scenario covered by
+    test_duckdb_and_pggraph_both_isolate_collections_from_each_other above
+    (DROP TABLE CASCADE + apply_schema() from scratch) never exercises
+    this: it always registers chunks WITH tenant_column from the start.
+
+    This test instead simulates the real upgrade path: register chunks
+    with pgGraph using the OLD (pre-Task-2) argument set first, then
+    re-run the CURRENT apply_schema() against that already-registered
+    table -- matching redeploying this feature's schema changes against
+    an existing production database -- and asserts pgGraph's own
+    registration metadata shows tenant_column actually set to
+    'collection_id' afterward, not merely that *a* chunks registration
+    exists (apply_schema()'s own verification only checks presence via
+    _registration_contains(), which would pass identically whether
+    tenant_column is set or not).
+    """
+    conn = await _require_live_postgres()
+    try:
+        await conn.execute("DROP TABLE IF EXISTS chunk_edges, chunks, papers CASCADE")
+
+        # Recreate the bare tables (matching sql/schema.sql's own
+        # CREATE TABLE shape, collection_id column included -- the column
+        # already existed live before this feature's pgGraph registration
+        # was updated, since the ALTER TABLE migration and the
+        # tenant_column registration change shipped together in the same
+        # commit but are logically separable steps), then register
+        # chunks with pgGraph using the OLD pre-Task-2 call shape: no
+        # tenant_column kwarg at all.
+        await conn.execute(
+            """
+            CREATE TABLE papers (
+                doi text PRIMARY KEY,
+                title text,
+                metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+                collection_id text NOT NULL DEFAULT 'global'
+            );
+            CREATE TABLE chunks (
+                id text PRIMARY KEY,
+                paper_doi text REFERENCES papers(doi),
+                text text NOT NULL,
+                section text,
+                token_count integer,
+                collection_id text NOT NULL DEFAULT 'global'
+            );
+            CREATE TABLE chunk_edges (
+                src_chunk_id text NOT NULL REFERENCES chunks(id),
+                dst_chunk_id text NOT NULL REFERENCES chunks(id),
+                similarity real NOT NULL,
+                collection_id text NOT NULL DEFAULT 'global',
+                PRIMARY KEY (src_chunk_id, dst_chunk_id)
+            );
+            """
+        )
+        await conn.execute(
+            """
+            SELECT graph.add_table(
+                table_name := 'public.chunks'::regclass,
+                id_column := 'id',
+                columns := ARRAY['text', 'section']
+            )
+            """
+        )
+
+        # Now apply the CURRENT schema.sql (tenant_column-including) on
+        # top of that already-registered table -- the real upgrade path.
+        await apply_schema(DSN)
+
+        # pgGraph's own registration metadata must show tenant_column set
+        # to 'collection_id' for chunks AFTERWARD. Filter
+        # graph.registered_tables() down to the row(s) naming 'chunks'
+        # first, then check for 'collection_id' only within those rows --
+        # checking the unfiltered rowset would risk a false pass from an
+        # unrelated row.
+        #
+        # UNCERTAIN WITHOUT A LIVE INSTANCE: the exact column name/shape
+        # graph.registered_tables() returns for tenant_column (e.g. a
+        # `tenant_column` column directly, vs. it being folded into some
+        # other representation) has not been verified against a real
+        # pgGraph -- same documented uncertainty apply_schema.py's own
+        # _registration_contains() helper already flags for 'chunks' and
+        # 'similar_to'. This reuses that same loose, column-name-agnostic
+        # string-search helper for consistency and to avoid the
+        # verification itself breaking on a wrong column-name guess; it
+        # must be confirmed once this runs against a real Postgres+pgGraph.
+        registered_tables = await conn.fetch("SELECT * FROM graph.registered_tables()")
+        chunks_rows = [
+            row
+            for row in registered_tables
+            if any(v is not None and "chunks" in str(v) for v in row.values())
+        ]
+        assert chunks_rows, (
+            f"no 'chunks' registration found in graph.registered_tables() "
+            f"after upgrade-path apply_schema(): {registered_tables!r}"
+        )
+        assert _registration_contains(chunks_rows, "collection_id"), (
+            "graph.add_table()'s upgrade path did not set "
+            "tenant_column='collection_id' on the chunks registration -- "
+            f"registered_tables() rows for chunks: {chunks_rows!r}"
+        )
+    finally:
         await conn.execute("TRUNCATE chunk_edges, chunks, papers CASCADE")
         await conn.close()
