@@ -128,6 +128,7 @@ class HybridRetriever(BaseRetriever):
         metadata: Optional[dict] = None,
         similarity_threshold: float = 0.7,
         max_neighbors: int = 10,
+        collection_id: Optional[str] = None,
     ) -> dict:
         """Insert one newly-ingested paper's already-chunked-and-embedded
         chunks into Postgres (text/metadata), DuckDB (embeddings), and
@@ -160,11 +161,20 @@ class HybridRetriever(BaseRetriever):
                 chunk_edges row (passed through to insert_chunks).
             max_neighbors: maximum edges per new chunk (passed through to
                 insert_chunks).
+            collection_id: the collection to insert into, or None to
+                insert into the global collection (resolved via
+                resolve_collection_id() -- see that function's docstring
+                for why this translation matters). Callers wanting to
+                ALSO write into the global corpus (the admin
+                also_global path) must call insert_paper() a second time
+                with collection_id="global" -- this method always does
+                exactly one write, never two.
 
         Returns:
             Stats dict from insert_chunks: papers_inserted,
             chunks_inserted, edges_inserted.
         """
+        resolved_collection_id = resolve_collection_id(collection_id)
         papers = {
             c.source_file: {"doi": doi, "title": title, "metadata": metadata or {}}
             for c in chunks
@@ -177,6 +187,7 @@ class HybridRetriever(BaseRetriever):
                 self.duckdb_store,
                 similarity_threshold=similarity_threshold,
                 max_neighbors=max_neighbors,
+                collection_id=resolved_collection_id,
             )
         )
 

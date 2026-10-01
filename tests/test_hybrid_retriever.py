@@ -503,3 +503,69 @@ def test_retrieve_sets_graph_tenant_setting_guc_before_graph_expand(tmp_path):
     assert "graph.tenant_setting" in first_execute_call.args[0]
     assert first_execute_call.args[1] == "know-123"
     assert first_execute_call.args[2] is True
+
+
+@pytest.mark.unit
+def test_insert_paper_resolves_none_collection_id_to_global(tmp_path):
+    from src.chunking import Chunk
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        chunk = Chunk(
+            id="new1",
+            text="hello",
+            source_file="10.1038/x",
+            embedding=[0.1, 0.2, 0.3, 0.4],
+        )
+        retriever.insert_paper(doi="10.1038/x", chunks=[chunk], collection_id=None)
+        retriever.close()
+    store.close()
+
+    insert_call = next(
+        c for c in conn.execute.call_args_list if "INSERT INTO chunks" in c.args[0]
+    )
+    assert insert_call.args[-1] == "global"
+
+
+@pytest.mark.unit
+def test_insert_paper_passes_through_explicit_collection_id(tmp_path):
+    from src.chunking import Chunk
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        chunk = Chunk(
+            id="new1",
+            text="hello",
+            source_file="10.1038/x",
+            embedding=[0.1, 0.2, 0.3, 0.4],
+        )
+        retriever.insert_paper(
+            doi="10.1038/x", chunks=[chunk], collection_id="know-123"
+        )
+        retriever.close()
+    store.close()
+
+    insert_call = next(
+        c for c in conn.execute.call_args_list if "INSERT INTO chunks" in c.args[0]
+    )
+    assert insert_call.args[-1] == "know-123"
