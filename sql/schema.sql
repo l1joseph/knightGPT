@@ -22,6 +22,18 @@ CREATE TABLE IF NOT EXISTS chunk_edges (
     PRIMARY KEY (src_chunk_id, dst_chunk_id)
 );
 
+-- Per-user/per-project collections migration -- see
+-- docs/superpowers/specs/2026-10-01-per-user-collections-design.md.
+-- NOT NULL with a constant default is a fast, metadata-only change on
+-- Postgres 17 (no table rewrite) and makes every existing row an
+-- explicit, queryable member of the 'global' collection rather than an
+-- implicit NULL -- NULL = anything is never true in SQL, which would
+-- make pgGraph's tenant_column scoping unable to ever match existing
+-- rows if collection_id were nullable instead.
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
+ALTER TABLE chunk_edges ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
+
 CREATE TABLE IF NOT EXISTS qiita_studies (
     study_id                bigint PRIMARY KEY,
     sample_count            integer NOT NULL,
@@ -79,7 +91,8 @@ BEGIN
   PERFORM graph.add_table(
       table_name := 'public.chunks'::regclass,
       id_column := 'id',
-      columns := ARRAY['text', 'section']
+      columns := ARRAY['text', 'section'],
+      tenant_column := 'collection_id'
   );
 EXCEPTION WHEN OTHERS THEN
   RAISE NOTICE 'graph.add_table(public.chunks) raised % (%) -- ignored, assumed already registered; verify with SELECT * FROM graph.registered_tables()', SQLERRM, SQLSTATE;
