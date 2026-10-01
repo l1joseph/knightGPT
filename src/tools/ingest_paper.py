@@ -297,7 +297,29 @@ class IngestPaperTool(BaseTool):
                 title=doc.title,
                 collection_id=primary_collection_id,
             )
-            if write_global_too:
+        except Exception as e:
+            logger.error(f"ingest_paper: insert failed for {doi_str}: {e}")
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error=(
+                    f"Downloaded and embedded {doi_str}, but inserting it "
+                    f"into the corpus failed: {e}"
+                ),
+                metadata={"doi": doi_str},
+            )
+
+        # The primary-collection write above is already durably committed
+        # at this point. The global copy below is a separate, optional
+        # second write -- if IT fails, the overall operation must still be
+        # reported as a success (the paper genuinely is in the corpus and
+        # searchable in the attached collection), just with a clear note
+        # that the global copy specifically did not happen. Retrying the
+        # whole tool call later is safe either way: the primary write's
+        # ON CONFLICT (id) DO NOTHING makes it a no-op on retry.
+        global_copy_error: str | None = None
+        if write_global_too:
+            try:
                 # Same content, DERIVED chunk ids (":global" suffix) --
                 # chunks.id/chunk_embeddings.id are PRIMARY KEY columns,
                 # so reusing the exact same id for a second collection's
@@ -320,24 +342,25 @@ class IngestPaperTool(BaseTool):
                     "edges_inserted": insert_stats.get("edges_inserted", 0)
                     + global_stats.get("edges_inserted", 0),
                 }
-        except Exception as e:
-            logger.error(f"ingest_paper: insert failed for {doi_str}: {e}")
-            return ToolResult(
-                tool_name=self.name,
-                success=False,
-                error=(
-                    f"Downloaded and embedded {doi_str}, but inserting it "
-                    f"into the corpus failed: {e}"
-                ),
-                metadata={"doi": doi_str},
-            )
+            except Exception as e:
+                logger.error(
+                    f"ingest_paper: global-copy insert failed for {doi_str} "
+                    f"(primary collection write already succeeded): {e}"
+                )
+                global_copy_error = str(e)
 
         chunks_inserted = insert_stats.get("chunks_inserted", 0)
         edges_inserted = insert_stats.get("edges_inserted", 0)
         title_display = doc.title or doi_str
-        also_global_note = (
-            " (also added to the global corpus)" if write_global_too else ""
-        )
+
+        if global_copy_error is not None:
+            also_global_note = (
+                " (the global-corpus copy FAILED -- see global_copy_error)"
+            )
+        elif write_global_too:
+            also_global_note = " (also added to the global corpus)"
+        else:
+            also_global_note = ""
 
         return ToolResult(
             tool_name=self.name,
@@ -353,6 +376,8 @@ class IngestPaperTool(BaseTool):
                 "source": result.get("source"),
                 "collection_id": primary_collection_id,
                 "also_global": write_global_too,
+                "global_copy_failed": global_copy_error is not None,
+                "global_copy_error": global_copy_error,
                 **insert_stats,
             },
         )

@@ -554,3 +554,71 @@ def test_model_supplied_collection_id_kwarg_is_never_read_for_tenancy(tmp_path):
 
     assert result.success is True
     assert mock_retriever.insert_paper.call_args.kwargs["collection_id"] == "know-123"
+
+
+@pytest.mark.unit
+def test_execute_also_global_partial_failure_reports_success_with_note(tmp_path):
+    """If the PRIMARY (attached-collection) insert_paper() call succeeds
+    but the SECOND (global-copy) call then raises, the primary collection
+    write is already durably committed -- the overall ToolResult must be
+    success=True (the paper really is in the corpus and searchable there),
+    with a clear note that the global copy specifically failed and why.
+    This must not look like a total failure to the caller."""
+    from src.tools.ingest_paper import IngestPaperTool
+
+    doc = _make_doc(tmp_path)
+    chunk = Chunk(id="c1", text="text", source_file=str(doc.file_path))
+
+    mock_retriever = MagicMock()
+    mock_retriever.insert_paper.side_effect = [
+        {"chunks_inserted": 1, "edges_inserted": 0},
+        RuntimeError("duckdb: database is locked"),
+    ]
+    tool = IngestPaperTool(retriever=mock_retriever)
+
+    mock_chunker_instance = MagicMock()
+    mock_chunker_instance.chunk_markdown_file.return_value = [chunk]
+    mock_embedder_instance = MagicMock()
+    mock_embedder_instance.check_health.return_value = True
+    mock_embedder_instance.embed_chunks.side_effect = lambda chunks, **kw: (
+        [setattr(c, "embedding", [0.1]) or c for c in chunks]
+    )
+
+    ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id="know-123"
+    )
+
+    with (
+        patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
+        patch(
+            "scripts.download_papers.download_single_paper",
+            return_value={
+                "status": "downloaded",
+                "doi": "10.1038/x",
+                "doc": doc,
+                "source": "unpaywall",
+            },
+        ),
+        patch(
+            "src.tools.ingest_paper.SemanticChunker", return_value=mock_chunker_instance
+        ),
+        patch(
+            "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
+        ),
+    ):
+        result = tool.execute("10.1038/x", also_global=True, request_context=ctx)
+
+    # Primary write succeeded -- the paper is genuinely in the corpus, so
+    # this must NOT be reported as an overall failure.
+    assert result.success is True
+    assert mock_retriever.insert_paper.call_count == 2
+
+    # The result must clearly communicate the global-copy failure
+    # somewhere a caller/admin would see it.
+    assert result.metadata["global_copy_failed"] is True
+    assert "duckdb: database is locked" in result.metadata["global_copy_error"]
+    assert "global" in result.data.lower()
+    assert "fail" in result.data.lower()
+
+    # The primary collection's successful insert is still reflected.
+    assert result.metadata["collection_id"] == "know-123"
