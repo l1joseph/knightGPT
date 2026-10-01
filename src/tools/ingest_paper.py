@@ -29,13 +29,23 @@ safe to call from a thread already inside a running event loop.
 """
 
 import re
+from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..chunking import SemanticChunker
 from ..embedding import VLLMEmbedder
 from ..ingestion.web_scraper import MicrobiomeScraper
 from ..utils import get_logger, get_settings
 from .base import BaseTool, ToolResult
+
+if TYPE_CHECKING:
+    # Deferred at runtime (see execute()'s body) -- a module-level
+    # `from ..api.request_context import RequestContext` would be a
+    # circular import: src.api.__init__ imports .main, which imports
+    # src.agents, which imports this module (same pattern as
+    # src/tools/base.py and src/agents/orchestrator.py).
+    from ..api.request_context import RequestContext
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -69,8 +79,18 @@ class IngestPaperTool(BaseTool):
         """
         self.retriever = retriever
 
-    def execute(self, query: str, doi: str | None = None, **kwargs) -> ToolResult:
-        """Download, chunk, embed, and insert one paper by DOI.
+    def execute(
+        self,
+        query: str,
+        doi: str | None = None,
+        also_global: bool = False,
+        *,
+        request_context: "RequestContext | None" = None,
+        **kwargs,
+    ) -> ToolResult:
+        """Download, chunk, embed, and insert one paper by DOI, scoped to
+        the collection attached to the current chat (or the global
+        corpus for an admin with also_global or no collection attached).
 
         Args:
             query: the DOI or doi.org URL (accepted here for consistency
@@ -80,7 +100,21 @@ class IngestPaperTool(BaseTool):
             doi: same as query, offered as an explicit alternative in
                 case the model supplies it as a named "doi" argument
                 instead (this tool's schema asks for "doi").
+            also_global: if True, ALSO insert into the global corpus in
+                addition to the attached collection. Honored only when
+                request_context.is_admin is True -- anyone else setting
+                it gets a clear ToolResult(success=False, ...) error,
+                never silent ignoring (see the spec's Decisions section).
+            request_context: identity + collection scope, injected by
+                AgentOrchestrator.run() -- never sourced from this
+                method's own **kwargs even if the model's JSON
+                tool-call arguments happen to include a collection_id-
+                or request_context-shaped key.
         """
+        from ..api.request_context import RequestContext
+
+        ctx = request_context or RequestContext()
+
         doi_str = (doi or query or "").strip()
         doi_str = _DOI_URL_PREFIX.sub("", doi_str)
 
@@ -89,6 +123,37 @@ class IngestPaperTool(BaseTool):
                 tool_name=self.name,
                 success=False,
                 error="No DOI was provided.",
+            )
+
+        if also_global and not ctx.is_admin:
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error="Only admin can add to the global corpus.",
+                metadata={"doi": doi_str},
+            )
+
+        if ctx.collection_id is not None:
+            primary_collection_id: str | None = ctx.collection_id
+            write_global_too = also_global and ctx.is_admin
+        elif ctx.is_admin:
+            # No collection attached, admin caller: default to global,
+            # preserving today's existing single-corpus behavior for
+            # casual admin use. Already global -- no second write needed
+            # even if also_global was also set.
+            primary_collection_id = None
+            write_global_too = False
+        else:
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error=(
+                    "No Knowledge collection is attached to this chat, and "
+                    "you are not an admin. Attach a collection in Open WebUI "
+                    "before adding a paper to the corpus, or ask an admin to "
+                    "add it to the global corpus."
+                ),
+                metadata={"doi": doi_str},
             )
 
         if self.retriever is None or not hasattr(self.retriever, "insert_paper"):
@@ -227,8 +292,34 @@ class IngestPaperTool(BaseTool):
 
         try:
             insert_stats = self.retriever.insert_paper(
-                doi=doi_str, chunks=chunks, title=doc.title
+                doi=doi_str,
+                chunks=chunks,
+                title=doc.title,
+                collection_id=primary_collection_id,
             )
+            if write_global_too:
+                # Same content, DERIVED chunk ids (":global" suffix) --
+                # chunks.id/chunk_embeddings.id are PRIMARY KEY columns,
+                # so reusing the exact same id for a second collection's
+                # row would make this second write a silent
+                # ON CONFLICT DO NOTHING no-op. Text/embedding are reused
+                # unchanged -- no second chunk/embed pass (see the
+                # plan's design note on this double-write).
+                global_chunks = [replace(c, id=f"{c.id}:global") for c in chunks]
+                global_stats = self.retriever.insert_paper(
+                    doi=doi_str,
+                    chunks=global_chunks,
+                    title=doc.title,
+                    collection_id="global",
+                )
+                insert_stats = {
+                    "papers_inserted": insert_stats.get("papers_inserted", 0)
+                    + global_stats.get("papers_inserted", 0),
+                    "chunks_inserted": insert_stats.get("chunks_inserted", 0)
+                    + global_stats.get("chunks_inserted", 0),
+                    "edges_inserted": insert_stats.get("edges_inserted", 0)
+                    + global_stats.get("edges_inserted", 0),
+                }
         except Exception as e:
             logger.error(f"ingest_paper: insert failed for {doi_str}: {e}")
             return ToolResult(
@@ -244,12 +335,15 @@ class IngestPaperTool(BaseTool):
         chunks_inserted = insert_stats.get("chunks_inserted", 0)
         edges_inserted = insert_stats.get("edges_inserted", 0)
         title_display = doc.title or doi_str
+        also_global_note = (
+            " (also added to the global corpus)" if write_global_too else ""
+        )
 
         return ToolResult(
             tool_name=self.name,
             success=True,
             data=(
-                f"Added '{title_display}' ({doi_str}) to the corpus: "
+                f"Added '{title_display}' ({doi_str}) to the corpus{also_global_note}: "
                 f"{chunks_inserted} chunks inserted, {edges_inserted} "
                 "graph edges created."
             ),
@@ -257,6 +351,8 @@ class IngestPaperTool(BaseTool):
                 "doi": doi_str,
                 "title": doc.title,
                 "source": result.get("source"),
+                "collection_id": primary_collection_id,
+                "also_global": write_global_too,
                 **insert_stats,
             },
         )
@@ -274,6 +370,17 @@ class IngestPaperTool(BaseTool):
                         "description": (
                             "The paper's DOI, e.g. '10.1038/s41586-023-12345-6', "
                             "or a doi.org URL."
+                        ),
+                    },
+                    "also_global": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, also add this paper to the global corpus "
+                            "(shared by every collection) in addition to the "
+                            "currently attached collection. Only honored for "
+                            "admin users -- set this only if the user "
+                            "explicitly asks to add a paper globally/for "
+                            "everyone, not by default."
                         ),
                     },
                 },

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.api.request_context import RequestContext
 from src.chunking import Chunk
 
 
@@ -65,6 +66,10 @@ def test_execute_success_downloads_chunks_embeds_and_inserts(tmp_path):
 
     mock_embedder_instance.embed_chunks.side_effect = _embed_chunks
 
+    admin_ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id=None
+    )
+
     with (
         patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
         patch(
@@ -83,7 +88,7 @@ def test_execute_success_downloads_chunks_embeds_and_inserts(tmp_path):
             "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
         ),
     ):
-        result = tool.execute("10.1038/x")
+        result = tool.execute("10.1038/x", request_context=admin_ctx)
 
     assert result.success is True
     assert result.tool_name == "ingest_paper"
@@ -130,6 +135,10 @@ def test_execute_accepts_doi_org_url_and_strips_prefix(tmp_path):
         captured_doi["doi"] = doi
         return {"status": "downloaded", "doi": doi, "doc": doc, "source": "unpaywall"}
 
+    admin_ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id=None
+    )
+
     with (
         patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
         patch(
@@ -142,7 +151,7 @@ def test_execute_accepts_doi_org_url_and_strips_prefix(tmp_path):
             "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
         ),
     ):
-        result = tool.execute("https://doi.org/10.1038/x")
+        result = tool.execute("https://doi.org/10.1038/x", request_context=admin_ctx)
 
     assert result.success is True
     assert captured_doi["doi"] == "10.1038/x"
@@ -164,7 +173,10 @@ def test_execute_no_retriever_configured_returns_failure_not_exception():
     from src.tools.ingest_paper import IngestPaperTool
 
     tool = IngestPaperTool(retriever=None)
-    result = tool.execute("10.1038/x")
+    admin_ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id=None
+    )
+    result = tool.execute("10.1038/x", request_context=admin_ctx)
 
     assert result.success is False
     assert "unavailable" in result.error.lower()
@@ -177,6 +189,9 @@ def test_execute_doi_not_resolvable_returns_clear_failure(tmp_path):
     from src.tools.ingest_paper import IngestPaperTool
 
     tool = IngestPaperTool(retriever=MagicMock())
+    admin_ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id=None
+    )
 
     with (
         patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
@@ -189,7 +204,7 @@ def test_execute_doi_not_resolvable_returns_clear_failure(tmp_path):
             },
         ),
     ):
-        result = tool.execute("10.1038/nonexistent")
+        result = tool.execute("10.1038/nonexistent", request_context=admin_ctx)
 
     assert result.success is False
     assert "10.1038/nonexistent" in result.error
@@ -201,6 +216,9 @@ def test_execute_already_downloaded_returns_success_with_no_op_message(tmp_path)
     from src.tools.ingest_paper import IngestPaperTool
 
     tool = IngestPaperTool(retriever=MagicMock())
+    admin_ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id=None
+    )
 
     with (
         patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
@@ -209,7 +227,7 @@ def test_execute_already_downloaded_returns_success_with_no_op_message(tmp_path)
             return_value={"status": "skipped", "doi": "10.1038/x"},
         ),
     ):
-        result = tool.execute("10.1038/x")
+        result = tool.execute("10.1038/x", request_context=admin_ctx)
 
     assert result.success is True
     assert result.metadata["status"] == "already_downloaded"
@@ -223,6 +241,9 @@ def test_execute_embedding_server_down_returns_failure(tmp_path):
     chunk = Chunk(id="c1", text="text", source_file=str(doc.file_path))
 
     tool = IngestPaperTool(retriever=MagicMock())
+    admin_ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id=None
+    )
 
     mock_chunker_instance = MagicMock()
     mock_chunker_instance.chunk_markdown_file.return_value = [chunk]
@@ -247,7 +268,7 @@ def test_execute_embedding_server_down_returns_failure(tmp_path):
             "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
         ),
     ):
-        result = tool.execute("10.1038/x")
+        result = tool.execute("10.1038/x", request_context=admin_ctx)
 
     assert result.success is False
     assert "embedding server" in result.error.lower()
@@ -260,6 +281,9 @@ def test_execute_download_exception_returns_failure_not_exception(tmp_path):
     from src.tools.ingest_paper import IngestPaperTool
 
     tool = IngestPaperTool(retriever=MagicMock())
+    admin_ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id=None
+    )
 
     with (
         patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
@@ -268,7 +292,265 @@ def test_execute_download_exception_returns_failure_not_exception(tmp_path):
             side_effect=RuntimeError("network exploded"),
         ),
     ):
-        result = tool.execute("10.1038/x")
+        result = tool.execute("10.1038/x", request_context=admin_ctx)
 
     assert result.success is False
     assert "network exploded" in result.error
+
+
+@pytest.mark.unit
+def test_execute_non_admin_with_collection_attached_writes_to_that_collection(tmp_path):
+    from src.tools.ingest_paper import IngestPaperTool
+
+    doc = _make_doc(tmp_path)
+    chunk = Chunk(id="c1", text="text", source_file=str(doc.file_path))
+
+    mock_retriever = MagicMock()
+    mock_retriever.insert_paper.return_value = {
+        "chunks_inserted": 1,
+        "edges_inserted": 0,
+    }
+    tool = IngestPaperTool(retriever=mock_retriever)
+
+    mock_chunker_instance = MagicMock()
+    mock_chunker_instance.chunk_markdown_file.return_value = [chunk]
+    mock_embedder_instance = MagicMock()
+    mock_embedder_instance.check_health.return_value = True
+    mock_embedder_instance.embed_chunks.side_effect = lambda chunks, **kw: (
+        [setattr(c, "embedding", [0.1]) or c for c in chunks]
+    )
+
+    ctx = RequestContext(
+        email="alice@example.com", is_admin=False, collection_id="know-123"
+    )
+
+    with (
+        patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
+        patch(
+            "scripts.download_papers.download_single_paper",
+            return_value={
+                "status": "downloaded",
+                "doi": "10.1038/x",
+                "doc": doc,
+                "source": "unpaywall",
+            },
+        ),
+        patch(
+            "src.tools.ingest_paper.SemanticChunker", return_value=mock_chunker_instance
+        ),
+        patch(
+            "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
+        ),
+    ):
+        result = tool.execute("10.1038/x", request_context=ctx)
+
+    assert result.success is True
+    mock_retriever.insert_paper.assert_called_once()
+    assert mock_retriever.insert_paper.call_args.kwargs["collection_id"] == "know-123"
+
+
+@pytest.mark.unit
+def test_execute_non_admin_with_no_collection_attached_fails_clearly():
+    from src.tools.ingest_paper import IngestPaperTool
+
+    tool = IngestPaperTool(retriever=MagicMock())
+    ctx = RequestContext(
+        email="mallory@example.com", is_admin=False, collection_id=None
+    )
+
+    result = tool.execute("10.1038/x", request_context=ctx)
+
+    assert result.success is False
+    assert "collection" in result.error.lower()
+    tool.retriever.insert_paper.assert_not_called()
+
+
+@pytest.mark.unit
+def test_execute_admin_with_no_collection_attached_defaults_to_global(tmp_path):
+    """Preserves today's existing single-corpus behavior for casual admin
+    use -- no collection attached and no also_global still works for an
+    admin, going straight to the global corpus."""
+    from src.tools.ingest_paper import IngestPaperTool
+
+    doc = _make_doc(tmp_path)
+    chunk = Chunk(id="c1", text="text", source_file=str(doc.file_path))
+
+    mock_retriever = MagicMock()
+    mock_retriever.insert_paper.return_value = {
+        "chunks_inserted": 1,
+        "edges_inserted": 0,
+    }
+    tool = IngestPaperTool(retriever=mock_retriever)
+
+    mock_chunker_instance = MagicMock()
+    mock_chunker_instance.chunk_markdown_file.return_value = [chunk]
+    mock_embedder_instance = MagicMock()
+    mock_embedder_instance.check_health.return_value = True
+    mock_embedder_instance.embed_chunks.side_effect = lambda chunks, **kw: (
+        [setattr(c, "embedding", [0.1]) or c for c in chunks]
+    )
+
+    ctx = RequestContext(email="admin@example.com", is_admin=True, collection_id=None)
+
+    with (
+        patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
+        patch(
+            "scripts.download_papers.download_single_paper",
+            return_value={
+                "status": "downloaded",
+                "doi": "10.1038/x",
+                "doc": doc,
+                "source": "unpaywall",
+            },
+        ),
+        patch(
+            "src.tools.ingest_paper.SemanticChunker", return_value=mock_chunker_instance
+        ),
+        patch(
+            "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
+        ),
+    ):
+        result = tool.execute("10.1038/x", request_context=ctx)
+
+    assert result.success is True
+    mock_retriever.insert_paper.assert_called_once()
+    assert mock_retriever.insert_paper.call_args.kwargs["collection_id"] is None
+
+
+@pytest.mark.unit
+def test_execute_also_global_by_non_admin_fails_with_exact_error(tmp_path):
+    from src.tools.ingest_paper import IngestPaperTool
+
+    tool = IngestPaperTool(retriever=MagicMock())
+    ctx = RequestContext(
+        email="mallory@example.com", is_admin=False, collection_id="know-123"
+    )
+
+    result = tool.execute("10.1038/x", also_global=True, request_context=ctx)
+
+    assert result.success is False
+    assert result.error == "Only admin can add to the global corpus."
+    tool.retriever.insert_paper.assert_not_called()
+
+
+@pytest.mark.unit
+def test_execute_admin_also_global_writes_twice_with_derived_global_chunk_ids(tmp_path):
+    """The admin also_global path must call insert_paper() twice: once
+    for the attached collection with the chunk's ORIGINAL id, once for
+    'global' with a DERIVED id (f'{id}:global') -- chunks.id/
+    chunk_embeddings.id are both PRIMARY KEY columns, so reusing the
+    exact same id for both writes would make the second one a silent
+    ON CONFLICT DO NOTHING no-op (see this plan's design note)."""
+    from src.tools.ingest_paper import IngestPaperTool
+
+    doc = _make_doc(tmp_path)
+    chunk = Chunk(id="c1", text="text", source_file=str(doc.file_path))
+
+    mock_retriever = MagicMock()
+    mock_retriever.insert_paper.return_value = {
+        "chunks_inserted": 1,
+        "edges_inserted": 0,
+    }
+    tool = IngestPaperTool(retriever=mock_retriever)
+
+    mock_chunker_instance = MagicMock()
+    mock_chunker_instance.chunk_markdown_file.return_value = [chunk]
+    mock_embedder_instance = MagicMock()
+    mock_embedder_instance.check_health.return_value = True
+    mock_embedder_instance.embed_chunks.side_effect = lambda chunks, **kw: (
+        [setattr(c, "embedding", [0.1]) or c for c in chunks]
+    )
+
+    ctx = RequestContext(
+        email="admin@example.com", is_admin=True, collection_id="know-123"
+    )
+
+    with (
+        patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
+        patch(
+            "scripts.download_papers.download_single_paper",
+            return_value={
+                "status": "downloaded",
+                "doi": "10.1038/x",
+                "doc": doc,
+                "source": "unpaywall",
+            },
+        ),
+        patch(
+            "src.tools.ingest_paper.SemanticChunker", return_value=mock_chunker_instance
+        ),
+        patch(
+            "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
+        ),
+    ):
+        result = tool.execute("10.1038/x", also_global=True, request_context=ctx)
+
+    assert result.success is True
+    assert mock_retriever.insert_paper.call_count == 2
+
+    first_call, second_call = mock_retriever.insert_paper.call_args_list
+    assert first_call.kwargs["collection_id"] == "know-123"
+    assert [c.id for c in first_call.kwargs["chunks"]] == ["c1"]
+
+    assert second_call.kwargs["collection_id"] == "global"
+    assert [c.id for c in second_call.kwargs["chunks"]] == ["c1:global"]
+    # Content reused, not re-chunked/re-embedded -- same text/embedding.
+    assert second_call.kwargs["chunks"][0].text == "text"
+    assert second_call.kwargs["chunks"][0].embedding == [0.1]
+
+
+@pytest.mark.unit
+def test_model_supplied_collection_id_kwarg_is_never_read_for_tenancy(tmp_path):
+    """Even if the model's JSON tool-call arguments include a
+    collection_id key (ingest_paper's schema doesn't declare one, but a
+    model can still hallucinate extra arguments), it must land in
+    **kwargs and be ignored -- only request_context.collection_id decides
+    where the paper is written."""
+    from src.tools.ingest_paper import IngestPaperTool
+
+    doc = _make_doc(tmp_path)
+    chunk = Chunk(id="c1", text="text", source_file=str(doc.file_path))
+
+    mock_retriever = MagicMock()
+    mock_retriever.insert_paper.return_value = {
+        "chunks_inserted": 1,
+        "edges_inserted": 0,
+    }
+    tool = IngestPaperTool(retriever=mock_retriever)
+
+    mock_chunker_instance = MagicMock()
+    mock_chunker_instance.chunk_markdown_file.return_value = [chunk]
+    mock_embedder_instance = MagicMock()
+    mock_embedder_instance.check_health.return_value = True
+    mock_embedder_instance.embed_chunks.side_effect = lambda chunks, **kw: (
+        [setattr(c, "embedding", [0.1]) or c for c in chunks]
+    )
+
+    ctx = RequestContext(
+        email="alice@example.com", is_admin=False, collection_id="know-123"
+    )
+
+    with (
+        patch("src.tools.ingest_paper.settings", _fake_settings(tmp_path)),
+        patch(
+            "scripts.download_papers.download_single_paper",
+            return_value={
+                "status": "downloaded",
+                "doi": "10.1038/x",
+                "doc": doc,
+                "source": "unpaywall",
+            },
+        ),
+        patch(
+            "src.tools.ingest_paper.SemanticChunker", return_value=mock_chunker_instance
+        ),
+        patch(
+            "src.tools.ingest_paper.VLLMEmbedder", return_value=mock_embedder_instance
+        ),
+    ):
+        result = tool.execute(
+            "10.1038/x", request_context=ctx, collection_id="attacker-chosen-collection"
+        )
+
+    assert result.success is True
+    assert mock_retriever.insert_paper.call_args.kwargs["collection_id"] == "know-123"
