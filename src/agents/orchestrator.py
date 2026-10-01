@@ -14,7 +14,7 @@ format, which stays in src/api/sse_adapter.py.
 import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from openai import OpenAI
 
@@ -27,6 +27,17 @@ from ..tools.qiime2 import QIIME2Tool
 from ..tools.ingest_paper import IngestPaperTool
 from ..tools.search_corpus import SearchCorpusTool
 from ..utils import get_logger, get_settings
+
+if TYPE_CHECKING:
+    # Deferred to a TYPE_CHECKING-only import (same pattern as
+    # src/tools/base.py) because src.api's package __init__ imports
+    # src.api.main, which imports AgentOrchestrator from this very module
+    # -- a module-level `from ..api.request_context import RequestContext`
+    # here would make `import src.agents` raise ImportError: cannot import
+    # name 'AgentOrchestrator' from partially initialized module
+    # 'src.agents' (circular import). The real import happens lazily
+    # inside run(), by which point both packages are fully initialized.
+    from ..api.request_context import RequestContext
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -93,6 +104,7 @@ class AgentOrchestrator:
         temperature: float = 0.3,
         max_tokens: int = 2000,
         history: list[dict] | None = None,
+        request_context: "RequestContext | None" = None,
     ) -> AgentContext:
         """Run the function-calling agent loop.
 
@@ -119,9 +131,22 @@ class AgentOrchestrator:
                 Passed straight through to every LLM call this run makes.
                 Optional; omitted or empty means a single-turn conversation
                 (unchanged prior behavior).
+            request_context: identity + collection scope for this request
+                (see src/api/request_context.py), injected into every
+                tool.execute() call as a keyword-only argument the
+                model's JSON tool-call arguments can never populate or
+                override. Optional; omitted (the default) uses an
+                all-None/non-admin/no-collection context, preserving
+                existing behavior for any caller that doesn't pass one
+                (e.g. a script calling run() directly).
         """
+        # Imported lazily (not at module level) to avoid a circular import
+        # -- see the TYPE_CHECKING comment near the top of this file.
+        from ..api.request_context import RequestContext
+
         emit = on_event or (lambda event: None)
         ctx = AgentContext(original_query=query)
+        effective_request_context = request_context or RequestContext()
 
         rag_context = self._retrieve_rag_context(query, top_k)
         ctx.rag_context = rag_context
@@ -213,7 +238,12 @@ class AgentOrchestrator:
                 else:
                     result = tool.execute(
                         args.get("query", ""),
-                        **{k: v for k, v in args.items() if k != "query"},
+                        request_context=effective_request_context,
+                        **{
+                            k: v
+                            for k, v in args.items()
+                            if k not in ("query", "request_context")
+                        },
                     )
                 ctx.tool_results.append(result)
 

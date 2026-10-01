@@ -275,8 +275,11 @@ def test_simultaneous_tool_calls_get_distinct_indices():
 def test_non_dict_tool_arguments_default_to_empty_dict():
     """Valid-but-non-object JSON arguments (e.g. a bare "null") must not
     crash args.get()/.items() downstream -- they should just behave like
-    no arguments were given."""
+    no arguments were given (aside from the orchestrator's own injected
+    request_context, which is always present -- see the request_context
+    tests below)."""
     from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
     from src.tools.base import BaseTool, ToolResult
 
     captured_kwargs = {}
@@ -303,7 +306,10 @@ def test_non_dict_tool_arguments_default_to_empty_dict():
     events = []
     ctx = orchestrator.run("test query", on_event=events.append)
 
-    assert captured_kwargs == {"query": "", "extra": {}}
+    assert captured_kwargs == {
+        "query": "",
+        "extra": {"request_context": RequestContext()},
+    }
     assert ctx.final_answer == "final answer"
 
 
@@ -385,6 +391,131 @@ def test_history_is_included_between_system_prompt_and_current_query():
         "role": "user",
         "content": "so what are the microbes",
     }
+
+
+@pytest.mark.unit
+def test_request_context_is_injected_into_every_tool_call():
+    """The orchestrator's own RequestContext (not anything from the
+    model's JSON args) must reach tool.execute() as the request_context
+    keyword on every call."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
+    from src.tools.base import BaseTool, ToolResult
+
+    captured = {}
+
+    class FakeTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, *, request_context=None, **kwargs) -> ToolResult:
+            captured["request_context"] = request_context
+            return ToolResult(tool_name=self.name, success=True, data="output")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FakeTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response("fake_tool", {"query": "x"}),
+        _fake_final_answer_response("final answer"),
+    ]
+
+    ctx = RequestContext(
+        email="alice@example.com", is_admin=True, collection_id="know-1"
+    )
+    orchestrator.run("test query", request_context=ctx)
+
+    assert captured["request_context"] is ctx
+
+
+@pytest.mark.unit
+def test_no_request_context_passed_defaults_to_non_admin_no_collection():
+    """Existing non-HTTP callers that don't pass request_context (e.g. any
+    script calling orchestrator.run() directly) must see an all-None /
+    non-admin context, preserving current behavior exactly -- not a
+    crash, not None itself reaching the tool."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
+    from src.tools.base import BaseTool, ToolResult
+
+    captured = {}
+
+    class FakeTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, *, request_context=None, **kwargs) -> ToolResult:
+            captured["request_context"] = request_context
+            return ToolResult(tool_name=self.name, success=True, data="output")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FakeTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response("fake_tool", {"query": "x"}),
+        _fake_final_answer_response("final answer"),
+    ]
+
+    orchestrator.run("test query")
+
+    assert captured["request_context"] == RequestContext()
+
+
+@pytest.mark.unit
+def test_model_hallucinated_request_context_arg_never_overrides_real_one():
+    """If the model's JSON tool-call arguments happen to include a key
+    named request_context (or collection_id), the orchestrator's own
+    RequestContext must still be what reaches tool.execute() --
+    model-supplied arguments must never be read for this purpose, and
+    must never even cause a 'got multiple values for keyword argument'
+    crash."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
+    from src.tools.base import BaseTool, ToolResult
+
+    captured = {}
+
+    class FakeTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, *, request_context=None, **kwargs) -> ToolResult:
+            captured["request_context"] = request_context
+            captured["kwargs"] = kwargs
+            return ToolResult(tool_name=self.name, success=True, data="output")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FakeTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response(
+            "fake_tool",
+            {
+                "query": "x",
+                "request_context": "evil",
+                "collection_id": "evil-collection",
+            },
+        ),
+        _fake_final_answer_response("final answer"),
+    ]
+
+    real_ctx = RequestContext(
+        email="alice@example.com", is_admin=True, collection_id="know-1"
+    )
+    orchestrator.run("test query", request_context=real_ctx)
+
+    assert captured["request_context"] is real_ctx
+    # The hallucinated collection_id landed harmlessly in **kwargs (no
+    # tool reads it for tenancy -- see Tasks 8/9) -- confirming it was
+    # passed through, not silently dropped or crashed on.
+    assert captured["kwargs"]["collection_id"] == "evil-collection"
+    assert "request_context" not in captured["kwargs"]
 
 
 @pytest.mark.unit
