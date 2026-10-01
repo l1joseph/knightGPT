@@ -95,18 +95,61 @@ class DuckDBStore:
         #
         # NOTE: the installed DuckDB version (1.5.5) raises
         # "Adding columns with constraints not yet supported" for
-        # ALTER TABLE ... ADD COLUMN with a NOT NULL constraint, so this
-        # omits NOT NULL (DEFAULT alone is accepted and still backfills
-        # existing rows to 'global'). This is enforced at the application
-        # level instead: insert_embeddings()/search() both take a plain,
-        # non-Optional str collection_id defaulting to 'global', so no
-        # code path in this class ever writes a NULL collection_id.
+        # ALTER TABLE ... ADD COLUMN with a NOT NULL constraint in a single
+        # statement, so the constraint is applied as a separate second
+        # statement instead. ADD COLUMN ... DEFAULT 'global' backfills every
+        # existing row to 'global' first, then ALTER COLUMN ... SET NOT NULL
+        # applies the constraint against the now-fully-backfilled column.
         self._con.execute(
             f"ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS "
             f"collection_id VARCHAR DEFAULT 'global'"
         )
+        self._enforce_collection_id_not_null()
         self._check_dimension()
         self._index_built = self._has_index()
+
+    def _enforce_collection_id_not_null(self) -> None:
+        """Apply the collection_id NOT NULL constraint, idempotently and
+        safely even when the HNSW index already exists on this table.
+
+        Two DuckDB 1.5.5 quirks interact here:
+        1. ALTER TABLE ... ALTER COLUMN ... SET NOT NULL is itself
+           idempotent (a no-op if the column is already constrained), so
+           a plain reopen of an already-migrated file is cheap -- but
+        2. that same statement raises DependencyException ("Cannot alter
+           entry ... because there are entries that depend on it") if
+           *any* index exists on the table at all, even one that has
+           nothing to do with collection_id (confirmed: the HNSW index
+           on `embedding` alone is enough to block it). Since
+           ensure_index() builds that index once and callers then keep
+           reopening the same file indefinitely, the index is present on
+           essentially every production reopen -- including the very
+           first reopen of a database migrated under an earlier version
+           of this code that added collection_id without NOT NULL and
+           had already called ensure_index(). So: skip entirely if
+           already constrained (the common, fast path); otherwise drop
+           the HNSW index if present, apply the constraint, then rebuild
+           the index exactly as ensure_index() would.
+        """
+        row = self._con.execute(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = 'collection_id'",
+            [_TABLE],
+        ).fetchone()
+        if row is not None and row[0] == "NO":
+            return  # already constrained -- nothing to do
+
+        had_index = self._has_index()
+        if had_index:
+            self._con.execute(f"DROP INDEX {_INDEX}")
+        self._con.execute(
+            f"ALTER TABLE {_TABLE} ALTER COLUMN collection_id SET NOT NULL"
+        )
+        if had_index:
+            self._con.execute(
+                f"CREATE INDEX {_INDEX} ON {_TABLE} "
+                f"USING HNSW (embedding) WITH (metric = 'cosine')"
+            )
 
     def _check_dimension(self) -> None:
         """Guard against opening a database file whose chunk_embeddings
@@ -153,7 +196,20 @@ class DuckDBStore:
         collection_id defaults to 'global' so existing callers that don't
         pass it (e.g. scripts/migrate_to_postgres.py) keep inserting into
         the global collection, preserving today's single-corpus behavior
-        unchanged."""
+        unchanged.
+
+        collection_id must never be None -- Python does not enforce the
+        `str` type hint at runtime, so a caller that explicitly passes
+        collection_id=None would otherwise write a NULL collection_id that
+        search() could never match (fail loud here instead; see
+        HybridRetriever.resolve_collection_id() in a later task for where
+        None is supposed to be resolved to a real string first)."""
+        if collection_id is None:
+            raise ValueError(
+                "collection_id must not be None -- pass the resolved "
+                "string, never None (see HybridRetriever.resolve_collection_id "
+                "in a later task)"
+            )
         with self._lock:
             if not rows:
                 return
@@ -205,7 +261,19 @@ class DuckDBStore:
         collection_id defaults to 'global' for backward compatibility with
         existing callers; HybridRetriever always passes an explicitly
         resolved value (never Python None -- see resolve_collection_id()
-        in src/retrieval/hybrid_retriever.py)."""
+        in src/retrieval/hybrid_retriever.py).
+
+        collection_id must never be None -- `WHERE collection_id = NULL`
+        is a valid, exception-free SQL query that silently matches zero
+        rows rather than erroring, which would otherwise manifest as an
+        empty result set with no indication anything is wrong. Fail loud
+        here instead of letting None reach the query."""
+        if collection_id is None:
+            raise ValueError(
+                "collection_id must not be None -- pass the resolved "
+                "string, never None (see HybridRetriever.resolve_collection_id "
+                "in a later task)"
+            )
         with self._lock:
             rows = self._con.execute(
                 f"""
