@@ -51,6 +51,13 @@ services:
       # (Settings -> Connections) to match, or Open WebUI's calls to
       # /v1/chat/completions will start failing with 401.
       - API_API_KEY=${API_API_KEY:-}
+      # Comma-separated admin email addresses (matched against
+      # RequestContext.email). An admin may add a paper to the global
+      # corpus via ingest_paper's also_global flag, or default to global
+      # ingestion when no Knowledge collection is attached -- see
+      # docs/superpowers/specs/2026-10-01-per-user-collections-design.md.
+      # No default: unset means no one is an admin for this deploy.
+      - API_ADMIN_EMAILS=${API_ADMIN_EMAILS:-}
     volumes:
       - ../data:/app/data:ro
       # ingest_paper (src/tools/ingest_paper.py) downloads new papers'

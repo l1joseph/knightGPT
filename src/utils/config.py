@@ -236,6 +236,23 @@ class APISettings(BaseSettings):
         default=None,
         description="API key for authentication",
     )
+    admin_emails: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of admin email addresses (matched against "
+            "RequestContext.email, case-insensitive). An admin may add a "
+            "paper to the global corpus via ingest_paper's also_global flag, "
+            "or default to global ingestion when no collection is attached. "
+            "Comma-separated raw string (not a JSON list) so it can be set "
+            "as a plain env var value, e.g. API_ADMIN_EMAILS=alice@x.com,bob@x.com."
+        ),
+    )
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        """Parsed, lowercased, whitespace-stripped admin_emails -- the form
+        RequestContext construction actually compares against."""
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
 
     model_config = SettingsConfigDict(
         env_prefix="API_",

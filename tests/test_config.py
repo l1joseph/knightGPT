@@ -70,3 +70,22 @@ def test_vllm_settings_embedding_dim_from_env(monkeypatch):
 
     settings = VLLMSettings()
     assert settings.embedding_dim == 4096
+
+
+@pytest.mark.unit
+def test_api_settings_admin_emails_defaults_to_empty(monkeypatch):
+    monkeypatch.delenv("API_ADMIN_EMAILS", raising=False)
+    from src.utils.config import APISettings
+
+    settings = APISettings(_env_file=None)
+    assert settings.admin_emails == ""
+    assert settings.admin_email_set == set()
+
+
+@pytest.mark.unit
+def test_api_settings_admin_email_set_splits_strips_and_lowercases(monkeypatch):
+    monkeypatch.setenv("API_ADMIN_EMAILS", " Alice@Example.com, bob@example.com ,")
+    from src.utils.config import APISettings
+
+    settings = APISettings()
+    assert settings.admin_email_set == {"alice@example.com", "bob@example.com"}
