@@ -104,3 +104,93 @@ def test_ensure_index_is_idempotent(tmp_path):
     store.ensure_index()
     store.ensure_index()  # must not raise
     store.close()
+
+
+@pytest.mark.unit
+def test_insert_and_search_are_scoped_by_collection_id(tmp_path):
+    """A query must only see embeddings inserted under the same
+    collection_id -- the core cross-tenant isolation guarantee for the
+    DuckDB vector-search path."""
+    from src.graph.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(str(tmp_path / "test.duckdb"), dim=4)
+    store.insert_embeddings(
+        [("a1", [1.0, 0.0, 0.0, 0.0])], collection_id="collection-a"
+    )
+    store.insert_embeddings(
+        [("b1", [1.0, 0.0, 0.0, 0.0])], collection_id="collection-b"
+    )
+    store.ensure_index()
+
+    results_a = store.search(
+        [1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="collection-a"
+    )
+    results_b = store.search(
+        [1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="collection-b"
+    )
+    store.close()
+
+    assert [r[0] for r in results_a] == ["a1"]
+    assert [r[0] for r in results_b] == ["b1"]
+
+
+@pytest.mark.unit
+def test_insert_embeddings_defaults_to_global_collection(tmp_path):
+    """Existing callers that don't pass collection_id (e.g. the batch
+    migration scripts) must keep inserting into 'global', preserving
+    today's single-corpus behavior."""
+    from src.graph.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(str(tmp_path / "test.duckdb"), dim=4)
+    store.insert_embeddings([("g1", [1.0, 0.0, 0.0, 0.0])])
+    store.ensure_index()
+
+    results = store.search([1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="global")
+    store.close()
+
+    assert [r[0] for r in results] == ["g1"]
+
+
+@pytest.mark.unit
+def test_search_defaults_to_global_collection(tmp_path):
+    from src.graph.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(str(tmp_path / "test.duckdb"), dim=4)
+    store.insert_embeddings([("g1", [1.0, 0.0, 0.0, 0.0])], collection_id="global")
+    store.insert_embeddings([("x1", [1.0, 0.0, 0.0, 0.0])], collection_id="other")
+    store.ensure_index()
+
+    results = store.search([1.0, 0.0, 0.0, 0.0], top_k=10)
+    store.close()
+
+    assert [r[0] for r in results] == ["g1"]
+
+
+@pytest.mark.unit
+def test_opening_an_existing_pre_migration_database_backfills_collection_id(tmp_path):
+    """A DuckDB file created before this migration has chunk_embeddings
+    with no collection_id column at all. Re-opening it with the migrated
+    DuckDBStore must add the column (defaulted to 'global') rather than
+    failing -- the DuckDB equivalent of the Postgres
+    ALTER TABLE ... ADD COLUMN IF NOT EXISTS migration in Task 2."""
+    import duckdb
+
+    db_path = str(tmp_path / "pre_migration.duckdb")
+    con = duckdb.connect(db_path)
+    con.execute("INSTALL vss")
+    con.execute("LOAD vss")
+    con.execute(
+        "CREATE TABLE chunk_embeddings (id VARCHAR PRIMARY KEY, embedding FLOAT[4])"
+    )
+    con.execute(
+        "INSERT INTO chunk_embeddings VALUES ('pre1', [1.0, 0.0, 0.0, 0.0]::FLOAT[4])"
+    )
+    con.close()
+
+    from src.graph.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(db_path, dim=4)
+    results = store.search([1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="global")
+    store.close()
+
+    assert [r[0] for r in results] == ["pre1"]

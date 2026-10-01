@@ -85,6 +85,26 @@ class DuckDBStore:
             f"CREATE TABLE IF NOT EXISTS {_TABLE} "
             f"(id VARCHAR PRIMARY KEY, embedding FLOAT[{dim}])"
         )
+        # Per-user/per-project collections migration -- see
+        # docs/superpowers/specs/2026-10-01-per-user-collections-design.md.
+        # ADD COLUMN IF NOT EXISTS is a no-op on a freshly-created table
+        # (which already has no collection_id column to add) and migrates
+        # an existing pre-migration database file in place, backfilling
+        # every existing row to the 'global' sentinel -- the DuckDB
+        # equivalent of sql/schema.sql's Postgres ALTER TABLE migration.
+        #
+        # NOTE: the installed DuckDB version (1.5.5) raises
+        # "Adding columns with constraints not yet supported" for
+        # ALTER TABLE ... ADD COLUMN with a NOT NULL constraint, so this
+        # omits NOT NULL (DEFAULT alone is accepted and still backfills
+        # existing rows to 'global'). This is enforced at the application
+        # level instead: insert_embeddings()/search() both take a plain,
+        # non-Optional str collection_id defaulting to 'global', so no
+        # code path in this class ever writes a NULL collection_id.
+        self._con.execute(
+            f"ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS "
+            f"collection_id VARCHAR DEFAULT 'global'"
+        )
         self._check_dimension()
         self._index_built = self._has_index()
 
@@ -121,22 +141,36 @@ class DuckDBStore:
         ).fetchone()
         return row[0] > 0
 
-    def insert_embeddings(self, rows: list[tuple[str, list[float]]]) -> None:
-        """Bulk-insert (id, embedding) pairs via a registered DataFrame --
-        NOT a per-row loop. A Python list/unnest-based insert was verified
-        catastrophically slow (90s+ for 6,179 rows) versus this path
-        (~0.3s for the same data) during design benchmarking."""
+    def insert_embeddings(
+        self, rows: list[tuple[str, list[float]]], collection_id: str = "global"
+    ) -> None:
+        """Bulk-insert (id, embedding) pairs, all tagged with the same
+        collection_id, via a registered DataFrame -- NOT a per-row loop.
+        A Python list/unnest-based insert was verified catastrophically
+        slow (90s+ for 6,179 rows) versus this path (~0.3s for the same
+        data) during design benchmarking.
+
+        collection_id defaults to 'global' so existing callers that don't
+        pass it (e.g. scripts/migrate_to_postgres.py) keep inserting into
+        the global collection, preserving today's single-corpus behavior
+        unchanged."""
         with self._lock:
             if not rows:
                 return
             ids, embeddings = zip(*rows)
-            df = pd.DataFrame({"id": list(ids), "embedding": list(embeddings)})
+            df = pd.DataFrame(
+                {
+                    "id": list(ids),
+                    "embedding": list(embeddings),
+                    "collection_id": [collection_id] * len(ids),
+                }
+            )
             self._con.register("_stage", df)
             try:
                 self._con.execute(
                     f"""
                     INSERT INTO {_TABLE}
-                    SELECT id, embedding::FLOAT[{self.dim}] FROM _stage
+                    SELECT id, embedding::FLOAT[{self.dim}], collection_id FROM _stage
                     ON CONFLICT (id) DO NOTHING
                     """
                 )
@@ -158,20 +192,30 @@ class DuckDBStore:
             self._index_built = True
 
     def search(
-        self, query_embedding: list[float], top_k: int
+        self,
+        query_embedding: list[float],
+        top_k: int,
+        collection_id: str = "global",
     ) -> list[tuple[str, float]]:
-        """Top-k nearest neighbors by cosine similarity, highest first.
-        Uses array_cosine_distance (NOT array_distance, which is l2sq --
-        using the wrong function silently disables the HNSW index)."""
+        """Top-k nearest neighbors by cosine similarity, highest first,
+        restricted to rows with this collection_id. Uses
+        array_cosine_distance (NOT array_distance, which is l2sq -- using
+        the wrong function silently disables the HNSW index).
+
+        collection_id defaults to 'global' for backward compatibility with
+        existing callers; HybridRetriever always passes an explicitly
+        resolved value (never Python None -- see resolve_collection_id()
+        in src/retrieval/hybrid_retriever.py)."""
         with self._lock:
             rows = self._con.execute(
                 f"""
                 SELECT id, 1 - array_cosine_distance(embedding, $1::FLOAT[{self.dim}]) AS similarity
                 FROM {_TABLE}
+                WHERE collection_id = $2
                 ORDER BY array_cosine_distance(embedding, $1::FLOAT[{self.dim}])
                 LIMIT {int(top_k)}
                 """,
-                [query_embedding],
+                [query_embedding, collection_id],
             ).fetchall()
             return [(r[0], float(r[1])) for r in rows]
 
