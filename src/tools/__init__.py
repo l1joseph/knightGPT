@@ -6,6 +6,7 @@ from .kegg import KEGGTool
 from .qiime2 import QIIME2Tool
 from .zotero import ZoteroTool
 from .ingest_paper import IngestPaperTool
+from .search_corpus import SearchCorpusTool
 
 __all__ = [
     "PubMedTool",
@@ -14,4 +15,5 @@ __all__ = [
     "QIIME2Tool",
     "ZoteroTool",
     "IngestPaperTool",
+    "SearchCorpusTool",
 ]
