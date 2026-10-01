@@ -47,7 +47,9 @@ def test_execute_returns_matches_with_scores():
         },
     ]
     assert result.metadata == {"query": "Akkermansia AD", "total_results": 2}
-    mock_retriever.retrieve.assert_called_once_with("Akkermansia AD", top_k=5)
+    mock_retriever.retrieve.assert_called_once_with(
+        "Akkermansia AD", top_k=5, collection_id=None
+    )
 
 
 @pytest.mark.unit
@@ -62,7 +64,9 @@ def test_execute_passes_through_custom_top_k():
     tool = SearchCorpusTool(retriever=mock_retriever, default_top_k=5)
     tool.execute("query", top_k=20)
 
-    mock_retriever.retrieve.assert_called_once_with("query", top_k=20)
+    mock_retriever.retrieve.assert_called_once_with(
+        "query", top_k=20, collection_id=None
+    )
 
 
 @pytest.mark.unit
@@ -136,3 +140,71 @@ def test_schema_requires_query():
     assert schema["parameters"]["required"] == ["query"]
     assert "query" in schema["parameters"]["properties"]
     assert "top_k" in schema["parameters"]["properties"]
+
+
+@pytest.mark.unit
+def test_execute_passes_request_context_collection_id_to_retrieve():
+    from src.api.request_context import RequestContext
+    from src.tools.search_corpus import SearchCorpusTool
+
+    mock_retriever = MagicMock()
+    mock_retriever.retrieve.return_value = RetrievalResult(
+        chunks=[], query_embedding=[], similarity_scores=[]
+    )
+
+    tool = SearchCorpusTool(retriever=mock_retriever)
+    ctx = RequestContext(
+        email="alice@example.com", is_admin=False, collection_id="know-123"
+    )
+    tool.execute("query", request_context=ctx)
+
+    mock_retriever.retrieve.assert_called_once_with(
+        "query", top_k=5, collection_id="know-123"
+    )
+
+
+@pytest.mark.unit
+def test_execute_no_request_context_searches_global():
+    """search_corpus has no model-facing collection override in v1: no
+    request_context (or one with collection_id=None) always means
+    whatever is in scope for the current request -- global if no
+    collection is attached."""
+    from src.tools.search_corpus import SearchCorpusTool
+
+    mock_retriever = MagicMock()
+    mock_retriever.retrieve.return_value = RetrievalResult(
+        chunks=[], query_embedding=[], similarity_scores=[]
+    )
+
+    tool = SearchCorpusTool(retriever=mock_retriever)
+    tool.execute("query")
+
+    mock_retriever.retrieve.assert_called_once_with(
+        "query", top_k=5, collection_id=None
+    )
+
+
+@pytest.mark.unit
+def test_model_supplied_collection_id_kwarg_is_never_read():
+    """search_corpus's schema does not declare a collection_id property,
+    but even if a model hallucinates one, it must land in **kwargs and be
+    ignored -- only request_context.collection_id decides search scope."""
+    from src.api.request_context import RequestContext
+    from src.tools.search_corpus import SearchCorpusTool
+
+    mock_retriever = MagicMock()
+    mock_retriever.retrieve.return_value = RetrievalResult(
+        chunks=[], query_embedding=[], similarity_scores=[]
+    )
+
+    tool = SearchCorpusTool(retriever=mock_retriever)
+    ctx = RequestContext(
+        email="alice@example.com", is_admin=False, collection_id="know-123"
+    )
+    tool.execute(
+        "query", request_context=ctx, collection_id="attacker-chosen-collection"
+    )
+
+    mock_retriever.retrieve.assert_called_once_with(
+        "query", top_k=5, collection_id="know-123"
+    )

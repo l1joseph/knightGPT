@@ -13,9 +13,20 @@ semantic-search + pgGraph-expansion logic /api/v1/search already uses --
 so this duplicates no retrieval logic of its own.
 """
 
+from typing import TYPE_CHECKING
+
 from ..retrieval.base import BaseRetriever
 from ..utils import get_logger
 from .base import BaseTool, ToolResult
+
+if TYPE_CHECKING:
+    # Deferred at runtime (see execute()'s body) -- a module-level
+    # `from ..api.request_context import RequestContext` would be a
+    # circular import: src.api.__init__ imports .main, which imports
+    # src.agents, which imports this module (same pattern as
+    # src/tools/base.py, src/agents/orchestrator.py, and
+    # src/tools/ingest_paper.py).
+    from ..api.request_context import RequestContext
 
 logger = get_logger(__name__)
 
@@ -47,8 +58,24 @@ class SearchCorpusTool(BaseTool):
         self.retriever = retriever
         self.default_top_k = default_top_k
 
-    def execute(self, query: str, top_k: int | None = None, **kwargs) -> ToolResult:
-        """Search the corpus and return matching chunks with scores."""
+    def execute(
+        self,
+        query: str,
+        top_k: int | None = None,
+        *,
+        request_context: "RequestContext | None" = None,
+        **kwargs,
+    ) -> ToolResult:
+        """Search the corpus and return matching chunks with scores,
+        scoped to request_context.collection_id (global if no collection
+        is attached). No model-facing collection override in v1 -- see
+        the spec's Decisions section; request_context is injected by
+        AgentOrchestrator.run(), never read from this method's own
+        **kwargs even if the model's JSON arguments happen to include a
+        collection_id-shaped key."""
+        from ..api.request_context import RequestContext
+
+        ctx = request_context or RequestContext()
         query = (query or "").strip()
         if not query:
             return ToolResult(
@@ -68,7 +95,11 @@ class SearchCorpusTool(BaseTool):
             )
 
         try:
-            result = self.retriever.retrieve(query, top_k=top_k or self.default_top_k)
+            result = self.retriever.retrieve(
+                query,
+                top_k=top_k or self.default_top_k,
+                collection_id=ctx.collection_id,
+            )
         except Exception as e:
             logger.error(f"search_corpus: retrieve failed for {query!r}: {e}")
             return ToolResult(
