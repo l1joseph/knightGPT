@@ -429,13 +429,19 @@ def test_retrieve_passes_explicit_collection_id_to_duckdb_search(tmp_path):
 
 
 @pytest.mark.unit
-def test_retrieve_sets_graph_tenant_setting_guc_before_graph_expand(tmp_path):
+def test_retrieve_sets_knightgpt_collection_id_guc_before_graph_expand(tmp_path):
     """The pgGraph expand() call must run inside a transaction whose first
-    statement sets the graph.tenant_setting GUC via the parameterized
-    set_config(..., true) form (the SET LOCAL-equivalent) -- not a bare
-    SET, and not skipped entirely. conn.transaction() must wrap the whole
-    read so the GUC is guaranteed to reset at transaction end regardless
-    of what happens next on this pooled connection."""
+    statement sets the knightgpt.collection_id GUC -- the custom GUC this
+    database's graph.tenant_setting is configured (once, in
+    sql/schema.sql) to read the tenant from -- via the parameterized
+    set_config(..., true) form (the SET LOCAL-equivalent), not a bare SET
+    and not skipped entirely. Setting graph.tenant_setting itself here
+    would be wrong: confirmed live on kl-remote that it holds the NAME of
+    another GUC (an indirection), not the tenant value, and graph.expand()
+    fails outright if the value goes into the wrong place. conn.
+    transaction() must wrap the whole read so the GUC is guaranteed to
+    reset at transaction end regardless of what happens next on this
+    pooled connection."""
     from src.retrieval.hybrid_retriever import HybridRetriever
 
     store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
@@ -500,7 +506,15 @@ def test_retrieve_sets_graph_tenant_setting_guc_before_graph_expand(tmp_path):
     conn.transaction.assert_called_once()
     first_execute_call = conn.execute.call_args_list[0]
     assert "set_config" in first_execute_call.args[0]
-    assert "graph.tenant_setting" in first_execute_call.args[0]
+    # Not "graph.tenant_setting" -- that GUC holds the NAME of another GUC
+    # to read the tenant from (an indirection), not the value itself.
+    # Confirmed live on kl-remote: setting graph.tenant_setting directly
+    # to the collection_id value made every graph.expand() call fail with
+    # "tenant scope is required for registered tables with tenant_column".
+    # This database is configured once (sql/schema.sql) to point
+    # graph.tenant_setting at knightgpt.collection_id -- that's the GUC
+    # the per-request value actually goes into.
+    assert "knightgpt.collection_id" in first_execute_call.args[0]
     assert first_execute_call.args[1] == "know-123"
     assert first_execute_call.args[2] is True
 

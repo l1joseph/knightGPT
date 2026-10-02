@@ -47,7 +47,9 @@ def resolve_collection_id(collection_id: str | None) -> str:
     """Translate RequestContext.collection_id's Python-level None (the
     natural idiom for "no collection attached") into the literal string
     'global' -- the database-layer sentinel every collection_id column
-    and the graph.tenant_setting GUC actually use. This is the ONE place
+    and the knightgpt.collection_id GUC (the value pgGraph's
+    graph.tenant_setting indirection actually reads -- see
+    _retrieve_async's comment) actually use. This is the ONE place
     in the whole feature this translation happens: retrieve() and
     insert_paper() below both call this before collection_id ever reaches
     a query parameter, a GUC, or DuckDBStore -- none of which ever see
@@ -227,18 +229,31 @@ class HybridRetriever(BaseRetriever):
         pool = self._pool
         async with pool.acquire() as conn:
             # Explicit transaction wrapping the whole read: pgGraph's
-            # tenant scoping is a session GUC (graph.tenant_setting, read
-            # by graph.enforce_tenant_scope -- see the spec's Decisions
-            # section), set here via the parameterized set_config(...,
-            # true) form -- the SET LOCAL-equivalent that resets
-            # automatically at transaction end regardless of
-            # commit/rollback. A bare SET (session-scoped) would leak
-            # across requests sharing this pooled connection -- treated
-            # as a bug, not a runtime fallback, per the spec's Error
-            # Handling section.
+            # tenant scoping is an INDIRECTION, not a direct value --
+            # graph.tenant_setting holds the NAME of another GUC to read
+            # the actual tenant from (read by graph.enforce_tenant_scope),
+            # it does not carry the tenant value itself. This database is
+            # configured once (sql/schema.sql: `ALTER DATABASE knightgpt
+            # SET graph.tenant_setting = 'knightgpt.collection_id'`) to
+            # point at the custom GUC knightgpt.collection_id -- so the
+            # per-request value goes INTO knightgpt.collection_id, never
+            # into graph.tenant_setting itself. Confirmed live on
+            # kl-remote: setting graph.tenant_setting directly to the
+            # collection_id value (an earlier, reviewed-but-wrong version
+            # of this code) made pgGraph fail every graph.expand() call
+            # with "tenant scope is required for registered tables with
+            # tenant_column" -- it was looking up current_setting(the
+            # literal string we'd stored), not finding a real tenant
+            # value through the indirection at all. Set via the
+            # parameterized set_config(..., true) form -- the SET
+            # LOCAL-equivalent that resets automatically at transaction
+            # end regardless of commit/rollback. A bare SET (session-
+            # scoped) would leak across requests sharing this pooled
+            # connection -- treated as a bug, not a runtime fallback, per
+            # the spec's Error Handling section.
             async with conn.transaction():
                 await conn.execute(
-                    "SELECT set_config('graph.tenant_setting', $1, $2)",
+                    "SELECT set_config('knightgpt.collection_id', $1, $2)",
                     collection_id,
                     True,
                 )

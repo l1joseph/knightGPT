@@ -70,6 +70,24 @@ COMMENT ON COLUMN qiita_studies.study_id IS
     'See the "KNOWN SIMPLIFICATION" block in '
     'scripts/qiita_registry_ingest.py for full detail.';
 
+-- pgGraph's tenant-scoping mechanism is an indirection: graph.tenant_setting
+-- holds the NAME of another GUC to read the actual tenant value from (read
+-- by graph.enforce_tenant_scope at query time), it does not carry the
+-- tenant value itself. This is a one-time, database-level configuration --
+-- ALTER DATABASE ... SET takes effect for new sessions, so it must run
+-- before anything opens a connection expecting tenant scoping to work, and
+-- it does not need to be (and should not be) re-set per request. Confirmed
+-- live on kl-remote: an earlier version of this codebase set
+-- graph.tenant_setting ITSELF to the per-request collection_id value
+-- (mistaking it for the value-holding GUC), which made every
+-- graph.expand() call fail with "tenant scope is required for registered
+-- tables with tenant_column" -- pgGraph was correctly looking up
+-- current_setting(graph.tenant_setting's own value) and finding no real
+-- GUC by that name. The actual per-request value goes into
+-- knightgpt.collection_id (see HybridRetriever._retrieve_async), the GUC
+-- this line points graph.tenant_setting at.
+ALTER DATABASE knightgpt SET graph.tenant_setting = 'knightgpt.collection_id';
+
 -- pgGraph registration: chunks as nodes, chunk_edges as an edge-table relationship.
 -- Idempotency is not assumed from pgGraph itself; each registration is wrapped
 -- in its own DO block so re-running this file against an already-provisioned

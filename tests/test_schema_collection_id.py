@@ -23,6 +23,24 @@ def test_table_gains_collection_id_column_migration(table):
 
 
 @pytest.mark.unit
+def test_tenant_setting_guc_points_at_knightgpt_collection_id():
+    """pgGraph's tenant scoping is an indirection: graph.tenant_setting
+    must be configured (once, database-level) to NAME the GUC the actual
+    tenant value goes into -- confirmed live on kl-remote that setting
+    graph.tenant_setting directly to the per-request collection_id value
+    (instead of this one-time pointer setup) makes every graph.expand()
+    call fail with "tenant scope is required for registered tables with
+    tenant_column". This line must run before the add_table registration
+    that relies on tenant scoping actually working."""
+    alter_db_idx = SCHEMA_SQL.index(
+        "ALTER DATABASE knightgpt SET graph.tenant_setting = "
+        "'knightgpt.collection_id';"
+    )
+    add_table_idx = SCHEMA_SQL.index("graph.add_table(")
+    assert alter_db_idx < add_table_idx
+
+
+@pytest.mark.unit
 def test_chunks_add_table_registers_collection_id_as_tenant_column():
     # The DO block registering public.chunks must declare tenant_column.
     add_table_start = SCHEMA_SQL.index("graph.add_table(")
