@@ -1,0 +1,43 @@
+# Minimal SearXNG settings override, bind-mounted into the searxng
+# service (see ../docker-compose.yaml) at /etc/searxng/settings.yml.
+#
+# use_default_settings: true merges this file on top of SearXNG's own
+# full default settings.yml (the documented way to ship a minimal
+# override -- see https://docs.searxng.org/admin/settings/settings.html)
+# rather than requiring every upstream key to be repeated here.
+#
+# This instance is internal-only: it is never published on a host port
+# (docker-compose.yaml binds it only to the internal knightgpt-net
+# network) and is called exclusively, server-to-server, by WebSearchTool
+# (src/tools/websearch.py). The two overrides below exist for that
+# reason:
+#   - search.formats adds "json": SearXNG serves HTML-only by default
+#     and rejects `?format=json` with a 403 unless json is explicitly
+#     allowlisted here.
+#   - server.limiter: false disables SearXNG's bot/rate-limiting
+#     middleware, which is designed to stop external scraping and would
+#     otherwise also throttle/block our own API container's requests.
+use_default_settings: true
+
+general:
+  instance_name: "knightGPT SearXNG (internal)"
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  # Only used for signing internal cookies/sessions -- this instance has
+  # no public-facing UI usage, but SearXNG requires a non-empty value at
+  # startup regardless. Fine as a fixed value for an internal-only
+  # service; rotate if this file is ever reused for a public instance.
+  secret_key: "e881105b3982c99a4d5dad6fc15f4523"
+  limiter: false
+  public_instance: false
+
+# No redis service is defined in docker-compose.yaml -- disable it
+# explicitly rather than leaving the default settings.yml's redis.url
+# pointed at a nonexistent "redis" host.
+redis:
+  url: false

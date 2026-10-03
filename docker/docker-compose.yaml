@@ -58,6 +58,11 @@ services:
       # docs/superpowers/specs/2026-10-01-per-user-collections-design.md.
       # No default: unset means no one is an admin for this deploy.
       - API_ADMIN_EMAILS=${API_ADMIN_EMAILS:-}
+      # WebSearchTool's (src/tools/websearch.py) SearXNG backend. Default
+      # already matches the searxng service's name below, so this is
+      # only needed to override it (e.g. kl-remote pointing at a
+      # different host).
+      - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
     volumes:
       - ../data:/app/data:ro
       # ingest_paper (src/tools/ingest_paper.py) downloads new papers'
@@ -136,6 +141,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - knightgpt-net
+
+  # SearXNG - self-hosted meta search engine backing WebSearchTool
+  # (src/tools/websearch.py) via its JSON search API. Internal-only,
+  # same as postgres: no host port published, reachable only over the
+  # knightgpt-net network by the api container (SEARXNG_URL defaults to
+  # http://searxng:8080, matching this service's name -- see
+  # src/utils/config.py's SearXNGSettings).
+  searxng:
+    image: searxng/searxng:latest
+    container_name: knightgpt-searxng
+    restart: unless-stopped
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks:
       - knightgpt-net
 
