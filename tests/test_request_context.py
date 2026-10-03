@@ -99,3 +99,30 @@ def test_collection_id_none_when_files_array_has_no_collection_entry():
     body = {"files": [{"type": "file", "id": "upload-1"}]}
     ctx = build_request_context({}, body, admin_emails=set())
     assert ctx.collection_id is None
+
+
+@pytest.mark.unit
+def test_collection_id_falls_back_to_top_level_body_key():
+    """OWUI's own `files`/`metadata.files` payload gets dropped by Open
+    WebUI's flattening step before it reaches us (see the Filter function
+    in deploy/openwebui-functions/), so a plain top-level `collection_id`
+    key -- injected by that Filter -- is the last-resort fallback source."""
+    body = {"collection_id": "test-a"}
+    ctx = build_request_context({}, body, admin_emails=set())
+    assert ctx.collection_id == "test-a"
+
+
+@pytest.mark.unit
+def test_collection_id_files_array_takes_priority_over_top_level_key():
+    body = {
+        "files": [{"type": "collection", "id": "know-123"}],
+        "collection_id": "test-a",
+    }
+    ctx = build_request_context({}, body, admin_emails=set())
+    assert ctx.collection_id == "know-123"
+
+
+@pytest.mark.unit
+def test_collection_id_none_when_neither_files_nor_top_level_key_present():
+    ctx = build_request_context({}, {}, admin_emails=set())
+    assert ctx.collection_id is None
