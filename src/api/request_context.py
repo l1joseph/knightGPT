@@ -51,6 +51,30 @@ def _first_matching_header(headers: Mapping[str, str], names: list[str]) -> str 
     return None
 
 
+_MODEL_ID_PREFIX = "knightgpt-rag-"
+
+
+def _collection_id_from_model(body: dict) -> str | None:
+    """Lowest-priority fallback: Open WebUI's model picker.
+
+    Open WebUI's "Knowledge" collection-attachment UI turned out to
+    never forward any reference to the attached collection to external
+    backends like this one (confirmed live, in production -- that whole
+    approach is dead). The replacement is the model picker: we register
+    one model id per collection, `f"knightgpt-rag-{collection_id}"`, in
+    /v1/models (see src/api/main.py's list_models()), and Open WebUI
+    always sends the selected model id back as the request's plain
+    `model` field. If `model` is exactly the bare "knightgpt-rag" (no
+    collection) or doesn't match this prefix at all, this contributes
+    nothing and resolution falls through to None, same as today."""
+    model = body.get("model", "")
+    if isinstance(model, str) and model.startswith(_MODEL_ID_PREFIX):
+        collection_id = model[len(_MODEL_ID_PREFIX) :]
+        if collection_id:
+            return collection_id
+    return None
+
+
 def _first_collection_id(body: dict) -> str | None:
     """First {"type": "collection", "id": ...} entry in body["files"], if
     any -- the shape Open WebUI sends when a Knowledge collection is
@@ -64,7 +88,12 @@ def _first_collection_id(body: dict) -> str | None:
     never present in production -- see
     deploy/openwebui-functions/collection_id_filter.py, an OWUI Filter
     function (inlet hook, runs before that flattening) that injects this
-    top-level key instead."""
+    top-level key instead.
+
+    Falls back further still, at lowest priority, to
+    _collection_id_from_model() -- see its docstring for why that whole
+    Knowledge-attachment approach (both of the checks above) turned out
+    to be dead in practice, and the model-picker replacement."""
     for entry in body.get("files") or []:
         if isinstance(entry, dict) and entry.get("type") == "collection":
             collection_id = entry.get("id")
@@ -73,7 +102,7 @@ def _first_collection_id(body: dict) -> str | None:
     collection_id = body.get("collection_id")
     if isinstance(collection_id, str) and collection_id:
         return collection_id
-    return None
+    return _collection_id_from_model(body)
 
 
 def build_request_context(

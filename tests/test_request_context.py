@@ -126,3 +126,51 @@ def test_collection_id_files_array_takes_priority_over_top_level_key():
 def test_collection_id_none_when_neither_files_nor_top_level_key_present():
     ctx = build_request_context({}, {}, admin_emails=set())
     assert ctx.collection_id is None
+
+
+@pytest.mark.unit
+def test_collection_id_from_model_prefix_fallback():
+    """Lowest-priority fallback: Open WebUI's model picker, used to
+    select a collection now that the Knowledge-attachment UI can't carry
+    collection_id (see model-id-per-collection design)."""
+    body = {"model": "knightgpt-rag-test-a"}
+    ctx = build_request_context({}, body, admin_emails=set())
+    assert ctx.collection_id == "test-a"
+
+
+@pytest.mark.unit
+def test_collection_id_none_for_bare_model_id():
+    """The bare base model id means no collection -- same as today."""
+    body = {"model": "knightgpt-rag"}
+    ctx = build_request_context({}, body, admin_emails=set())
+    assert ctx.collection_id is None
+
+
+@pytest.mark.unit
+def test_collection_id_none_for_unrelated_model_id():
+    body = {"model": "gpt-4"}
+    ctx = build_request_context({}, body, admin_emails=set())
+    assert ctx.collection_id is None
+
+
+@pytest.mark.unit
+def test_collection_id_none_when_no_model_key_present():
+    ctx = build_request_context({}, {}, admin_emails=set())
+    assert ctx.collection_id is None
+
+
+@pytest.mark.unit
+def test_collection_id_files_array_takes_priority_over_model_fallback():
+    body = {
+        "files": [{"type": "collection", "id": "know-123"}],
+        "model": "knightgpt-rag-test-a",
+    }
+    ctx = build_request_context({}, body, admin_emails=set())
+    assert ctx.collection_id == "know-123"
+
+
+@pytest.mark.unit
+def test_collection_id_top_level_key_takes_priority_over_model_fallback():
+    body = {"collection_id": "test-a", "model": "knightgpt-rag-test-b"}
+    ctx = build_request_context({}, body, admin_emails=set())
+    assert ctx.collection_id == "test-a"
