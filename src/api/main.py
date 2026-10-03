@@ -2,14 +2,17 @@
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import asyncpg
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from ..agents import AgentOrchestrator
@@ -675,21 +678,151 @@ async def google_form_webhook(
     return await webhook.handle_submission(request, background_tasks)
 
 
+_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+class CreateCollectionRequest(BaseModel):
+    """Request body for POST /api/v1/collections."""
+
+    slug: str = Field(
+        ...,
+        description=(
+            "Collection id, e.g. 'test-a'. Becomes the collection_id "
+            "requests are scoped to once selected via the model picker "
+            "(model id f'knightgpt-rag-{slug}')."
+        ),
+    )
+    display_name: Optional[str] = Field(
+        default=None,
+        description="Human-readable name shown alongside the collection.",
+    )
+
+    @field_validator("slug")
+    @classmethod
+    def _validate_slug(cls, value: str) -> str:
+        if value == "global":
+            raise ValueError(
+                "'global' is reserved and implicit -- it never needs a "
+                "collections row."
+            )
+        if not _SLUG_PATTERN.match(value):
+            raise ValueError(
+                "slug must match ^[a-z0-9][a-z0-9-]{0,39}$ (lowercase "
+                "alphanumerics and hyphens, starting with an "
+                "alphanumeric, max 40 chars)"
+            )
+        return value
+
+
+class CollectionResponse(BaseModel):
+    """A row from the collections registry table."""
+
+    id: str
+    display_name: Optional[str]
+    owner_email: Optional[str]
+    created_at: datetime
+
+
+@app.post("/api/v1/collections", response_model=CollectionResponse, status_code=201)
+async def create_collection(
+    payload: CreateCollectionRequest,
+    http_request: Request,
+    _: None = Depends(verify_api_key),
+):
+    """
+    Register a new collection in the discoverability registry.
+
+    This is NOT an enforcement mechanism -- papers/chunks/chunk_edges
+    accept any collection_id string with or without a matching row here.
+    It only makes the collection discoverable via /v1/models (one
+    knightgpt-rag-<slug> model entry per row) and GET
+    /api/v1/collections.
+    """
+    request_context = build_request_context(
+        http_request.headers, payload.model_dump(), settings.api.admin_email_set
+    )
+
+    try:
+        async with _pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO collections (id, display_name, owner_email)
+                VALUES ($1, $2, $3)
+                RETURNING id, display_name, owner_email, created_at
+                """,
+                payload.slug,
+                payload.display_name,
+                request_context.email,
+            )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Collection '{payload.slug}' already exists.",
+        )
+
+    return CollectionResponse(**dict(row))
+
+
+@app.get("/api/v1/collections", response_model=list[CollectionResponse])
+async def list_collections(_: None = Depends(verify_api_key)):
+    """
+    List all registered collections, oldest first.
+
+    Any authenticated caller may list -- collections are shareable/
+    collaborative by design from day one, not restricted to their owner
+    or to admins.
+    """
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, display_name, owner_email, created_at "
+            "FROM collections ORDER BY created_at"
+        )
+    return [CollectionResponse(**dict(row)) for row in rows]
+
+
 # OpenAI-compatible endpoints for Open WebUI integration
 @app.get("/v1/models")
 async def list_models():
-    """List available models (OpenAI-compatible)."""
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "knightgpt-rag",
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": "knight-lab",
-            }
-        ],
-    }
+    """List available models (OpenAI-compatible).
+
+    One entry per registered collection -- id
+    f"knightgpt-rag-{collection.id}" -- in addition to the bare
+    "knightgpt-rag" entry (collection_id None/'global'), which keeps
+    working exactly as before. Selecting a per-collection entry in Open
+    WebUI's model picker is how collection_id now reaches this API (see
+    src/api/request_context.py's _collection_id_from_model()) -- the
+    Knowledge collection-attachment UI never forwarded it. Falls back to
+    just the bare entry if the collections query fails, so a Postgres
+    outage never takes down model listing entirely.
+    """
+    models = [
+        {
+            "id": "knightgpt-rag",
+            "object": "model",
+            "created": 1700000000,
+            "owned_by": "knight-lab",
+        }
+    ]
+
+    if _pool is not None:
+        try:
+            async with _pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id FROM collections ORDER BY created_at"
+                )
+            models.extend(
+                {
+                    "id": f"knightgpt-rag-{row['id']}",
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": "knight-lab",
+                }
+                for row in rows
+            )
+        except Exception as e:
+            logger.error(f"Failed to list collections for /v1/models: {e}")
+
+    return {"object": "list", "data": models}
 
 
 def _split_latest_user_message(
