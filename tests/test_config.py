@@ -89,3 +89,32 @@ def test_api_settings_admin_email_set_splits_strips_and_lowercases(monkeypatch):
 
     settings = APISettings()
     assert settings.admin_email_set == {"alice@example.com", "bob@example.com"}
+
+
+@pytest.mark.unit
+def test_searxng_settings_defaults(monkeypatch):
+    """SearXNGSettings should read SEARXNG_URL and expose a default."""
+    monkeypatch.delenv("SEARXNG_URL", raising=False)
+    from src.utils.config import SearXNGSettings
+
+    settings = SearXNGSettings(_env_file=None)
+    assert settings.url == "http://searxng:8080"
+
+
+@pytest.mark.unit
+def test_searxng_settings_from_env(monkeypatch):
+    """SearXNGSettings should pick up SEARXNG_URL from the environment."""
+    monkeypatch.setenv("SEARXNG_URL", "http://custom-searxng:9000")
+    from src.utils.config import SearXNGSettings
+
+    settings = SearXNGSettings()
+    assert settings.url == "http://custom-searxng:9000"
+
+
+@pytest.mark.unit
+def test_settings_has_searxng_group():
+    """Main Settings object should expose a searxng settings group."""
+    from src.utils.config import Settings
+
+    settings = Settings()
+    assert settings.searxng.url

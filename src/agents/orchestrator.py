@@ -26,6 +26,8 @@ from ..tools.kegg import KEGGTool
 from ..tools.qiime2 import QIIME2Tool
 from ..tools.ingest_paper import IngestPaperTool
 from ..tools.search_corpus import SearchCorpusTool
+from ..tools.websearch import WebSearchTool
+from ..tools.webfetch import WebFetchTool
 from ..utils import get_logger, get_settings
 
 if TYPE_CHECKING:
@@ -87,6 +89,8 @@ class AgentOrchestrator:
             "qiime2_docs": QIIME2Tool(),
             "ingest_paper": IngestPaperTool(retriever=retriever),
             "search_corpus": SearchCorpusTool(retriever=retriever),
+            "web_search": WebSearchTool(),
+            "web_fetch": WebFetchTool(),
         }
 
         self.client = OpenAI(

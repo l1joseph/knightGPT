@@ -261,6 +261,21 @@ class APISettings(BaseSettings):
     )
 
 
+class SearXNGSettings(BaseSettings):
+    """SearXNG (self-hosted web search) configuration."""
+
+    url: str = Field(
+        default="http://searxng:8080",
+        description="SearXNG instance base URL (used by WebSearchTool)",
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="SEARXNG_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -271,6 +286,7 @@ class Settings(BaseSettings):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     rss: RSSSettings = Field(default_factory=RSSSettings)
     api: APISettings = Field(default_factory=APISettings)
+    searxng: SearXNGSettings = Field(default_factory=SearXNGSettings)
 
     # General settings
     log_level: str = Field(
