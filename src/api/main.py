@@ -99,7 +99,7 @@ class ChatRequest(BaseModel):
 
     message: str = Field(..., description="User message")
     top_k: int = Field(default=5, description="Number of chunks to retrieve")
-    max_tokens: int = Field(default=1024, description="Maximum response tokens")
+    max_tokens: int = Field(default=8000, description="Maximum response tokens")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     stream: bool = Field(default=False, description="Stream response")
 
@@ -744,7 +744,12 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
     messages = data.get("messages", [])
     stream = data.get("stream", False)
     temperature = data.get("temperature", 0.3)
-    max_tokens = data.get("max_tokens", 2000)
+    # Live-verified on kl-remote: detailed, citation-heavy answers were
+    # getting cut off mid-section at the old 2000-token default -- most
+    # OpenAI-compatible clients (including Open WebUI) only send
+    # max_tokens if the user explicitly set one in their own UI, so this
+    # default is what actually governs response length almost always.
+    max_tokens = data.get("max_tokens", 8000)
     request_context = build_request_context(
         request.headers, data, settings.api.admin_email_set
     )

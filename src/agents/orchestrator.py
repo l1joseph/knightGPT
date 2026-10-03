@@ -102,7 +102,7 @@ class AgentOrchestrator:
         on_event: Callable[[dict[str, Any]], None] | None = None,
         max_tool_rounds: int = 5,
         temperature: float = 0.3,
-        max_tokens: int = 2000,
+        max_tokens: int = 8000,
         history: list[dict] | None = None,
         request_context: "RequestContext | None" = None,
     ) -> AgentContext:
