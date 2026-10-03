@@ -748,6 +748,19 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
     request_context = build_request_context(
         request.headers, data, settings.api.admin_email_set
     )
+    # TEMPORARY DEBUG -- remove before merging. Diagnosing why
+    # RequestContext.collection_id is always None in production: every
+    # ingested paper has landed in 'global' regardless of which Knowledge
+    # collection was attached in Open WebUI's UI.
+    logger.info(
+        f"DEBUG request_context: email={request_context.email!r} "
+        f"is_admin={request_context.is_admin!r} "
+        f"collection_id={request_context.collection_id!r} "
+        f"data.files={data.get('files')!r} "
+        f"X-OpenWebUI-User-Email={request.headers.get('X-OpenWebUI-User-Email')!r} "
+        f"X-OpenWebUI-User-Id={request.headers.get('X-OpenWebUI-User-Id')!r} "
+        f"X-Auth-Request-Email={request.headers.get('X-Auth-Request-Email')!r}"
+    )
 
     user_message, history = _split_latest_user_message(messages)
 
