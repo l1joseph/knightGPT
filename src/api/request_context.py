@@ -54,12 +54,25 @@ def _first_matching_header(headers: Mapping[str, str], names: list[str]) -> str 
 def _first_collection_id(body: dict) -> str | None:
     """First {"type": "collection", "id": ...} entry in body["files"], if
     any -- the shape Open WebUI sends when a Knowledge collection is
-    attached to a chat. See the spec's Components section."""
+    attached to a chat. See the spec's Components section.
+
+    Falls back to a plain top-level body["collection_id"] string if no
+    such entry is found. Open WebUI's own flattening step (the one that
+    builds the plain OpenAI-style payload it forwards to external
+    backends like this one) drops body["files"]/body["metadata"]["files"]
+    entirely before the request reaches us, so in practice this entry is
+    never present in production -- see
+    deploy/openwebui-functions/collection_id_filter.py, an OWUI Filter
+    function (inlet hook, runs before that flattening) that injects this
+    top-level key instead."""
     for entry in body.get("files") or []:
         if isinstance(entry, dict) and entry.get("type") == "collection":
             collection_id = entry.get("id")
             if collection_id:
                 return collection_id
+    collection_id = body.get("collection_id")
+    if isinstance(collection_id, str) and collection_id:
+        return collection_id
     return None
 
 
