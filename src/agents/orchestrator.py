@@ -151,16 +151,21 @@ class AgentOrchestrator:
         rag_context = self._retrieve_rag_context(query, top_k)
         ctx.rag_context = rag_context
 
-        messages: list[dict] = [
-            {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
-        ]
+        # One single system message, not two -- live-verified against
+        # NRP's qwen3 endpoint that a second system message (even placed
+        # immediately after the first, both still ahead of any
+        # user/assistant turns) is rejected outright with "System message
+        # must be at the beginning." This went uncaught until now because
+        # _retrieve_rag_context() had its own bug (passing
+        # similarity_scores into format_context's max_tokens slot) that
+        # silently made rag_context always "" -- so the second system
+        # message never actually got added before that was fixed.
+        system_content = GENERATOR_SYSTEM_PROMPT
         if rag_context:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": f"Knowledge graph context:\n{rag_context}",
-                }
+            system_content = (
+                f"{GENERATOR_SYSTEM_PROMPT}\n\nKnowledge graph context:\n{rag_context}"
             )
+        messages: list[dict] = [{"role": "system", "content": system_content}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": query})

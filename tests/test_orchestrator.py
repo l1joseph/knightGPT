@@ -574,3 +574,37 @@ def test_retrieve_rag_context_calls_format_context_with_chunks_only():
 
     mock_retriever.format_context.assert_called_once_with(chunks)
     assert result == "formatted context"
+
+
+@pytest.mark.unit
+def test_rag_context_merges_into_single_system_message_not_two():
+    """Regression test: when rag_context is non-empty, it must be merged
+    into the ONE system message, not appended as a second separate
+    system-role message. Live-verified against NRP's qwen3 endpoint that
+    a second system message (even still ahead of any user/assistant
+    turns) is rejected outright with "System message must be at the
+    beginning." This went uncaught by every other orchestrator test
+    because they all set orchestrator.retriever = None, which makes
+    _retrieve_rag_context() return "" immediately -- never exercising
+    this code path at all."""
+    from src.agents.orchestrator import AgentOrchestrator, GENERATOR_SYSTEM_PROMPT
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = MagicMock()
+    orchestrator._retrieve_rag_context = MagicMock(return_value="some graph context")
+    orchestrator.tools = {}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_final_answer_response("answer"),
+    ]
+
+    orchestrator.run("simple query")
+
+    call_kwargs = orchestrator.client.chat.completions.create.call_args_list[0].kwargs
+    sent_messages = call_kwargs["messages"]
+
+    system_messages = [m for m in sent_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert GENERATOR_SYSTEM_PROMPT in system_messages[0]["content"]
+    assert "some graph context" in system_messages[0]["content"]
