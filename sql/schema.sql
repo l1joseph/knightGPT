@@ -34,6 +34,21 @@ ALTER TABLE papers ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
 ALTER TABLE chunk_edges ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
 
+-- Collections registry -- model-id-per-collection follow-up to the
+-- per-user/per-project collections migration above. Purely a
+-- discoverability aid for GET /api/v1/collections and /v1/models (which
+-- lists one knightgpt-rag-<id> model entry per row here, see
+-- src/api/main.py's list_models()) -- it is NOT used for enforcement.
+-- collection_id on papers/chunks/chunk_edges stays free-form text: any
+-- string works there whether or not a matching row exists here, and
+-- 'global' is implicit and never needs a row of its own.
+CREATE TABLE IF NOT EXISTS collections (
+    id           text PRIMARY KEY,
+    display_name text,
+    owner_email  text,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS qiita_studies (
     study_id                bigint PRIMARY KEY,
     sample_count            integer NOT NULL,
