@@ -384,9 +384,7 @@ class AgentOrchestrator:
             retrieval = self.retriever.retrieve(
                 query=query, top_k=top_k, expand_context=True
             )
-            return self.retriever.format_context(
-                retrieval.chunks, retrieval.similarity_scores
-            )
+            return self.retriever.format_context(retrieval.chunks)
         except Exception as e:
             logger.error(f"RAG retrieval failed: {e}")
             return ""

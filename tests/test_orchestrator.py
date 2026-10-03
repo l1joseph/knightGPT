@@ -541,3 +541,36 @@ def test_no_history_matches_prior_single_turn_behavior():
         {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
         {"role": "user", "content": "simple query"},
     ]
+
+
+@pytest.mark.unit
+def test_retrieve_rag_context_calls_format_context_with_chunks_only():
+    """Regression test: _retrieve_rag_context() used to call
+    retriever.format_context(chunks, similarity_scores), but
+    format_context()'s real signature is (chunks, max_tokens=4000) --
+    passing a list of scores into the max_tokens slot made every call
+    raise "'>' not supported between instances of 'int' and 'list'"
+    inside format_context's own token-budget check. Live-verified on
+    kl-remote: this was silently swallowed by _retrieve_rag_context's
+    broad except-and-log-empty-string handler the whole time, so the
+    automatic RAG context injected at the start of every run() call was
+    *always* empty, with nothing surfacing the failure. Confirmed
+    pre-existing (git blame: 2026-09-14), unrelated to collection
+    scoping -- just never caught until a live chat hit it."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.retrieval.base import RetrievalResult
+    from src.chunking import Chunk
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    chunks = [Chunk(id="c1", text="chunk text", source_file="10.1/a")]
+    mock_retriever = MagicMock()
+    mock_retriever.retrieve.return_value = RetrievalResult(
+        chunks=chunks, query_embedding=[], similarity_scores=[0.9]
+    )
+    mock_retriever.format_context.return_value = "formatted context"
+    orchestrator.retriever = mock_retriever
+
+    result = orchestrator._retrieve_rag_context("query", top_k=5)
+
+    mock_retriever.format_context.assert_called_once_with(chunks)
+    assert result == "formatted context"
