@@ -761,6 +761,11 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
         f"X-OpenWebUI-User-Id={request.headers.get('X-OpenWebUI-User-Id')!r} "
         f"X-Auth-Request-Email={request.headers.get('X-Auth-Request-Email')!r}"
     )
+    logger.info(f"DEBUG full request body keys: {sorted(data.keys())!r}")
+    for key in sorted(data.keys()):
+        if key == "messages":
+            continue  # can be large and isn't relevant to this diagnosis
+        logger.info(f"DEBUG body[{key!r}] = {data[key]!r}")
 
     user_message, history = _split_latest_user_message(messages)
 
