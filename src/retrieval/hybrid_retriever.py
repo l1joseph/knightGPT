@@ -26,7 +26,7 @@ from ..embedding import VLLMEmbedder
 from ..graph.duckdb_store import DuckDBStore
 from ..graph.postgres_builder import insert_chunks
 from ..utils import get_logger, get_settings
-from ..utils.db import sync_graph_on_connect
+from ..utils.db import insert_collection, sync_graph_on_connect
 from .base import BaseRetriever, RetrievalResult
 
 logger = get_logger(__name__)
@@ -192,6 +192,42 @@ class HybridRetriever(BaseRetriever):
                 collection_id=resolved_collection_id,
             )
         )
+
+    def create_collection(
+        self,
+        collection_id: str,
+        display_name: Optional[str] = None,
+        owner_email: Optional[str] = None,
+    ) -> dict:
+        """Register a new collection row via this retriever's own pool.
+
+        Reuses insert_collection() (src/utils/db.py) -- the exact same
+        INSERT POST /api/v1/collections runs (see src/api/main.py) --
+        rather than re-implementing it, and reuses this retriever's
+        existing self._pool/self._run bridge rather than opening a second
+        asyncpg pool, same rationale as insert_paper() above.
+        Synchronous; safe to call from any thread, including one already
+        inside a running event loop -- e.g. from
+        CreateCollectionTool.execute().
+
+        Args:
+            collection_id: the collection's slug/id. Callers are
+                responsible for format validation (see
+                src.utils.db.validate_collection_slug) -- this method
+                only performs the insert.
+            display_name: optional human-readable name.
+            owner_email: the creating user's email, or None.
+
+        Returns:
+            dict with id, display_name, owner_email, created_at.
+
+        Raises:
+            asyncpg.UniqueViolationError: if collection_id already exists.
+        """
+        row = self._run(
+            insert_collection(self._pool, collection_id, display_name, owner_email)
+        )
+        return dict(row)
 
     def close(self) -> None:
         """Close the pool and stop the private event loop. Call once, at

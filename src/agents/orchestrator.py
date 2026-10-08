@@ -25,6 +25,7 @@ from ..tools.openalex import OpenAlexTool
 from ..tools.kegg import KEGGTool
 from ..tools.qiime2 import QIIME2Tool
 from ..tools.ingest_paper import IngestPaperTool
+from ..tools.create_collection import CreateCollectionTool
 from ..tools.search_corpus import SearchCorpusTool
 from ..tools.websearch import WebSearchTool
 from ..tools.webfetch import WebFetchTool
@@ -53,7 +54,9 @@ Rules:
 - Cite sources using [Source: filename] or [DOI: xxx] format
 - If the context doesn't contain enough information, say so
 - Be precise about methods and findings
-- Distinguish between established knowledge and recent findings"""
+- Distinguish between established knowledge and recent findings
+- If the user asks to create a new project, collection, or workspace,
+  use the create_collection tool"""
 
 
 @dataclass
@@ -88,6 +91,7 @@ class AgentOrchestrator:
             "kegg_lookup": KEGGTool(),
             "qiime2_docs": QIIME2Tool(),
             "ingest_paper": IngestPaperTool(retriever=retriever),
+            "create_collection": CreateCollectionTool(retriever=retriever),
             "search_corpus": SearchCorpusTool(retriever=retriever),
             "web_search": WebSearchTool(),
             "web_fetch": WebFetchTool(),
