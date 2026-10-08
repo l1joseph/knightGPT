@@ -338,6 +338,109 @@ def test_llm_call_failure_emits_error_and_done_instead_of_raising():
 
 
 @pytest.mark.unit
+def test_empty_content_after_tool_failure_triggers_forced_synthesis():
+    """Regression test for a live production incident: a user asking to
+    "explain long read sequencing for metagenomics" saw only the model's
+    planning preamble ("I'll gather current literature...") and then
+    nothing -- the SSE stream completed normally (a real [DONE], no
+    error chunk), it just never carried a real answer.
+
+    Root cause: web_fetch 404'd on a URL from web_search's results (see
+    src/tools/webfetch.py -- it catches the failure and returns a
+    ToolResult(success=False, ...), it does not raise). The orchestrator
+    fed that failure back to the model as a tool-role message exactly as
+    designed. But the model's *next* turn came back with neither
+    tool_calls nor any real content -- and the old code treated "no
+    tool_calls" as unconditionally meaning "the model is done, use
+    `content` (here, '') as the final answer," so ctx.final_answer
+    silently became "". Nothing downstream ever surfaced that as an
+    error; the stream just ended.
+
+    The fix: a no-tool-calls turn with blank/whitespace-only content must
+    trigger one forced synthesis-only follow-up call instead of being
+    accepted as the final answer.
+    """
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.tools.base import BaseTool, ToolResult
+
+    class FailingWebFetchTool(BaseTool):
+        name = "web_fetch"
+        description = "fake"
+
+        def execute(self, query: str, **kwargs) -> ToolResult:
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error="404 Client Error: Not Found for url: "
+                "https://www.nature.com/articles/s12967-024-04917-1",
+            )
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"web_fetch": FailingWebFetchTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response(
+            "web_fetch", {"url": "https://www.nature.com/articles/s12967-024-04917-1"}
+        ),
+        _fake_final_answer_response(""),  # degenerate empty turn after the failure
+        _fake_final_answer_response(
+            "Long-read sequencing uses platforms such as PacBio and Oxford "
+            "Nanopore... [the fetch I attempted failed, so this draws on "
+            "general knowledge rather than that specific source]."
+        ),
+    ]
+
+    events = []
+    ctx = orchestrator.run("explain long read sequencing", on_event=events.append)
+
+    assert ctx.final_answer  # never empty/falsy
+    assert "Long-read sequencing" in ctx.final_answer
+    assert events[-1]["type"] == "done"
+    assert orchestrator.client.chat.completions.create.call_count == 3
+    # The forced synthesis call must not offer tools= (the model cannot
+    # request yet another round).
+    forced_call_kwargs = orchestrator.client.chat.completions.create.call_args_list[
+        -1
+    ].kwargs
+    assert "tools" not in forced_call_kwargs or forced_call_kwargs["tools"] is None
+
+
+@pytest.mark.unit
+def test_empty_content_persisting_through_forced_synthesis_falls_back_to_message():
+    """If even the forced synthesis-only call comes back empty, the
+    orchestrator must still never return "" as the final answer -- it
+    should fall back to a clear, visible message rather than silently
+    truncating the response."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.tools.base import BaseTool, ToolResult
+
+    class FailingTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, **kwargs) -> ToolResult:
+            return ToolResult(tool_name=self.name, success=False, error="boom")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FailingTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response("fake_tool", {"query": "x"}),
+        _fake_final_answer_response(""),
+        _fake_final_answer_response(""),
+    ]
+
+    ctx = orchestrator.run("test query")
+
+    assert ctx.final_answer
+    assert ctx.final_answer.strip() != ""
+
+
+@pytest.mark.unit
 def test_temperature_and_max_tokens_are_passed_to_llm_calls():
     """A client-requested temperature/max_tokens must reach the actual LLM
     call instead of being silently dropped in favor of hardcoded values."""

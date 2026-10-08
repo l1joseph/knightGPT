@@ -195,9 +195,34 @@ class AgentOrchestrator:
                 return ctx
 
             if not tool_calls:
-                # content was already streamed out token-by-token above --
-                # don't re-emit it as one more giant token event.
-                ctx.final_answer = content
+                if content and content.strip():
+                    # content was already streamed out token-by-token
+                    # above -- don't re-emit it as one more giant token
+                    # event.
+                    ctx.final_answer = content
+                    emit({"type": "done"})
+                    return ctx
+
+                # Degenerate case, confirmed live in production: after a
+                # tool call fails (e.g. web_fetch 404ing), the model's
+                # next turn can come back with neither tool_calls nor any
+                # real content. Treating that as "the model is done, ''
+                # is the final answer" is exactly the bug that silently
+                # truncated a user's visible response down to nothing but
+                # the planning preamble that preceded the failed tool
+                # call -- the SSE stream still completed normally (a
+                # "done" event, no error), so nothing ever surfaced the
+                # failure. Force one more synthesis-only call instead of
+                # accepting the empty content as final.
+                logger.warning(
+                    "Round %d returned no tool_calls and no real content "
+                    "(likely following a failed tool call); forcing a "
+                    "synthesis-only follow-up instead of truncating.",
+                    _round_num,
+                )
+                ctx.final_answer = self._force_final_answer(
+                    messages, emit, temperature, max_tokens
+                )
                 emit({"type": "done"})
                 return ctx
 
@@ -276,6 +301,35 @@ class AgentOrchestrator:
 
         # max_tool_rounds exhausted without a final answer -- force one,
         # with no tools offered so the model cannot request yet another round.
+        ctx.final_answer = self._force_final_answer(
+            messages, emit, temperature, max_tokens
+        )
+        emit({"type": "done"})
+        return ctx
+
+    def _force_final_answer(
+        self,
+        messages: list[dict],
+        emit: Callable[[dict[str, Any]], None],
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Make one more LLM call with no tools offered, forcing a
+        plain-text final answer, and guarantee the result is never empty.
+
+        Used both when max_tool_rounds is exhausted and when a round's
+        response comes back with neither tool_calls nor real content (see
+        the comment at that call site in run() for the production
+        incident this guards against). An LLM call failure here, or a
+        second empty completion, is reported as content rather than
+        silently returned as "" -- this is always the last thing run()
+        does before returning, so there is no later stage to catch an
+        empty final_answer.
+
+        Returns:
+            The LLM's answer text, or a fallback error/apology string --
+            never "".
+        """
         try:
             stream = self.client.chat.completions.create(
                 model=self.model,
@@ -293,16 +347,26 @@ class AgentOrchestrator:
             content, _tool_calls = self._consume_stream(stream, emit)
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
-            ctx.final_answer = f"The language model request failed: {e}"
             emit({"type": "error", "message": str(e)})
-            emit({"type": "done"})
-            return ctx
+            return f"The language model request failed: {e}"
 
         # No tools= was offered on this call, so content (already streamed
-        # out token-by-token above) is necessarily the final answer.
-        ctx.final_answer = content
-        emit({"type": "done"})
-        return ctx
+        # out token-by-token above) is necessarily the final answer --
+        # unless it's empty, in which case fall back rather than return "".
+        if content and content.strip():
+            return content
+
+        logger.error(
+            "Forced final-answer call returned empty content -- falling "
+            "back to a generic message instead of silently returning ''."
+        )
+        fallback = (
+            "I wasn't able to put together a complete answer for this "
+            "request -- some of the information I tried to gather may not "
+            "have been available. Please try rephrasing your question."
+        )
+        emit({"type": "token", "content": fallback})
+        return fallback
 
     def _consume_stream(
         self,
