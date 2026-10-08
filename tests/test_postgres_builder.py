@@ -359,6 +359,146 @@ async def test_insert_chunks_defaults_collection_id_to_global(tmp_path):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_delete_collection_data_deletes_edges_chunks_and_orphaned_papers(
+    tmp_path,
+):
+    """The common case: a collection's chunks reference papers that have
+    no chunks left in any other collection afterward -- those papers
+    rows must be deleted too, in FK-safe order (edges, then chunks, then
+    papers)."""
+    from src.graph.postgres_builder import delete_collection_data
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings([("c1", [1.0, 0.0, 0.0, 0.0])], collection_id="know-123")
+    store.ensure_index()
+
+    pool, conn = make_mock_pool()
+    conn.fetch.side_effect = [
+        [{"src_chunk_id": "c1"}],  # DELETE FROM chunk_edges ... RETURNING
+        [{"paper_doi": "10.1/x"}],  # candidate dois still in this collection
+        [{"id": "c1"}],  # DELETE FROM chunks ... RETURNING
+        [{"doi": "10.1/x"}],  # DELETE FROM papers ... RETURNING (orphaned)
+    ]
+
+    stats = await delete_collection_data(pool, store, "know-123")
+    store.close()
+
+    assert stats == {
+        "chunk_edges_deleted": 1,
+        "chunks_deleted": 1,
+        "papers_deleted": 1,
+        "duckdb_rows_deleted": 1,
+    }
+
+    delete_calls = [c.args[0] for c in conn.fetch.call_args_list]
+    assert any("DELETE FROM chunk_edges" in q for q in delete_calls)
+    assert any("DELETE FROM chunks" in q for q in delete_calls)
+    assert any("DELETE FROM papers" in q for q in delete_calls)
+    # Edges must be deleted before chunks (FK: chunk_edges -> chunks).
+    edge_idx = next(
+        i for i, q in enumerate(delete_calls) if "DELETE FROM chunk_edges" in q
+    )
+    chunk_idx = next(i for i, q in enumerate(delete_calls) if "DELETE FROM chunks" in q)
+    paper_idx = next(i for i, q in enumerate(delete_calls) if "DELETE FROM papers" in q)
+    assert edge_idx < chunk_idx < paper_idx
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_delete_collection_data_keeps_paper_still_referenced_by_other_collection(
+    tmp_path,
+):
+    """The also_global double-write case: a paper has chunks in TWO
+    collections sharing one papers.doi row. Deleting one collection's
+    chunks must NOT delete the papers row while the other collection's
+    chunks still reference it -- the NOT EXISTS check in the papers
+    DELETE must find a remaining chunks row and skip it."""
+    from src.graph.postgres_builder import delete_collection_data
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings([("c1:know-123", [1.0, 0.0, 0.0, 0.0])], "know-123")
+    store.ensure_index()
+
+    pool, conn = make_mock_pool()
+    conn.fetch.side_effect = [
+        [{"src_chunk_id": "c1:know-123"}],  # chunk_edges delete
+        [{"paper_doi": "10.1/shared"}],  # candidate dois
+        [{"id": "c1:know-123"}],  # chunks delete
+        [],  # papers delete -- NOT EXISTS fails (global chunk still refs it)
+    ]
+
+    stats = await delete_collection_data(pool, store, "know-123")
+    store.close()
+
+    assert stats["chunks_deleted"] == 1
+    assert stats["papers_deleted"] == 0
+
+    papers_call = next(
+        c for c in conn.fetch.call_args_list if "DELETE FROM papers" in c.args[0]
+    )
+    assert "NOT EXISTS" in papers_call.args[0]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_delete_collection_data_no_candidate_dois_skips_papers_delete(tmp_path):
+    """If the collection has no chunks with a paper_doi at all, the papers
+    DELETE must not even be attempted (ANY($1) with an empty list is
+    wasted work, not a correctness issue, but this also guards against a
+    stray unconditional papers-wide DELETE)."""
+    from src.graph.postgres_builder import delete_collection_data
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+
+    pool, conn = make_mock_pool()
+    conn.fetch.side_effect = [
+        [],  # chunk_edges delete
+        [],  # candidate dois -- none
+        [],  # chunks delete
+    ]
+
+    stats = await delete_collection_data(pool, store, "empty-collection")
+    store.close()
+
+    assert stats == {
+        "chunk_edges_deleted": 0,
+        "chunks_deleted": 0,
+        "papers_deleted": 0,
+        "duckdb_rows_deleted": 0,
+    }
+    delete_calls = [c.args[0] for c in conn.fetch.call_args_list]
+    assert not any("DELETE FROM papers" in q for q in delete_calls)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_delete_collection_data_deletes_duckdb_rows(tmp_path):
+    from src.graph.postgres_builder import delete_collection_data
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings(
+        [("c1", [1.0, 0.0, 0.0, 0.0]), ("c2", [0.0, 1.0, 0.0, 0.0])],
+        collection_id="know-123",
+    )
+    store.insert_embeddings([("other", [1.0, 0.0, 0.0, 0.0])], collection_id="global")
+    store.ensure_index()
+
+    pool, conn = make_mock_pool()
+    conn.fetch.side_effect = [[], [], []]
+
+    stats = await delete_collection_data(pool, store, "know-123")
+
+    results = store.search([1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="know-123")
+    other_results = store.search([1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="global")
+    store.close()
+
+    assert stats["duckdb_rows_deleted"] == 2
+    assert results == []
+    assert [r[0] for r in other_results] == ["other"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_insert_chunks_edge_candidate_search_scoped_to_same_collection(tmp_path):
     """Edges never cross collections: a chunk being ingested into
     collection A must only ever find edge candidates among chunks already

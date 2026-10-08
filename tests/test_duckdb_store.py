@@ -300,3 +300,60 @@ def test_search_rejects_none_collection_id(tmp_path):
         store.search([1.0, 0.0, 0.0, 0.0], top_k=10, collection_id=None)
 
     store.close()
+
+
+@pytest.mark.unit
+def test_delete_by_collection_id_removes_only_matching_rows(tmp_path):
+    """The admin-only destructive collection delete path needs a way to
+    wipe DuckDB rows for one collection_id without touching any other
+    collection's embeddings."""
+    from src.graph.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(str(tmp_path / "test.duckdb"), dim=4)
+    store.insert_embeddings(
+        [("a1", [1.0, 0.0, 0.0, 0.0]), ("a2", [0.0, 1.0, 0.0, 0.0])],
+        collection_id="collection-a",
+    )
+    store.insert_embeddings(
+        [("b1", [1.0, 0.0, 0.0, 0.0])], collection_id="collection-b"
+    )
+    store.ensure_index()
+
+    deleted_count = store.delete_by_collection_id("collection-a")
+
+    results_a = store.search(
+        [1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="collection-a"
+    )
+    results_b = store.search(
+        [1.0, 0.0, 0.0, 0.0], top_k=10, collection_id="collection-b"
+    )
+    store.close()
+
+    assert deleted_count == 2
+    assert results_a == []
+    assert [r[0] for r in results_b] == ["b1"]
+
+
+@pytest.mark.unit
+def test_delete_by_collection_id_no_matching_rows_returns_zero(tmp_path):
+    from src.graph.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(str(tmp_path / "test.duckdb"), dim=4)
+    store.insert_embeddings([("g1", [1.0, 0.0, 0.0, 0.0])], collection_id="global")
+
+    deleted_count = store.delete_by_collection_id("nonexistent")
+    store.close()
+
+    assert deleted_count == 0
+
+
+@pytest.mark.unit
+def test_delete_by_collection_id_rejects_none(tmp_path):
+    from src.graph.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(str(tmp_path / "test.duckdb"), dim=4)
+
+    with pytest.raises(ValueError, match="collection_id must not be None"):
+        store.delete_by_collection_id(None)
+
+    store.close()

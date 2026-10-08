@@ -300,6 +300,39 @@ class DuckDBStore:
             ).fetchall()
             return {r[0]: list(r[1]) for r in rows}
 
+    def delete_by_collection_id(self, collection_id: str) -> int:
+        """Permanently delete every embedding row tagged with
+        collection_id. Used by the admin-only destructive collection
+        delete path (DELETE /api/v1/collections/{slug}?delete_data=true
+        and the delete_collection agent tool) via
+        src/graph/postgres_builder.py's delete_collection_data(), which
+        calls this after the matching Postgres chunk_edges/chunks/papers
+        rows have already been removed.
+
+        collection_id must never be None -- same rationale as
+        search()/insert_embeddings() above (`WHERE collection_id = NULL`
+        is a valid, exception-free SQL query that silently matches zero
+        rows rather than erroring).
+
+        Args:
+            collection_id: the collection to delete every row for.
+
+        Returns:
+            Number of rows deleted.
+        """
+        if collection_id is None:
+            raise ValueError(
+                "collection_id must not be None -- pass the resolved "
+                "string, never None (see HybridRetriever.resolve_collection_id "
+                "in a later task)"
+            )
+        with self._lock:
+            rows = self._con.execute(
+                f"DELETE FROM {_TABLE} WHERE collection_id = $1 RETURNING id",
+                [collection_id],
+            ).fetchall()
+            return len(rows)
+
     def count(self) -> int:
         """Total number of embedded chunks -- used for the /health
         endpoint's visibility into the DuckDB store."""

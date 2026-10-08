@@ -242,3 +242,100 @@ async def insert_chunks(
 
     logger.info(f"Postgres ingestion complete: {stats}")
     return stats
+
+
+async def delete_collection_data(
+    pool: asyncpg.Pool,
+    duckdb_store: DuckDBStore,
+    collection_id: str,
+) -> dict:
+    """
+    Permanently delete every papers/chunks/chunk_edges row tagged with
+    collection_id (Postgres), plus every matching chunk_embeddings row
+    (DuckDB).
+
+    Admin-only and destructive -- the only two callers allowed to reach
+    this are DeleteCollectionTool (src/tools/delete_collection.py, via
+    HybridRetriever.delete_collection_data()) and DELETE
+    /api/v1/collections/{slug}?delete_data=true (src/api/main.py, which
+    awaits this directly on the main event loop, the same way
+    /api/v1/ingest awaits insert_chunks() directly above). Both gate on
+    request_context.is_admin before calling; this function performs no
+    such check itself, nor does it refuse the "global" collection_id --
+    callers are responsible for both.
+
+    Delete order respects sql/schema.sql's FK relationships
+    (chunk_edges REFERENCES chunks, chunks REFERENCES papers):
+    chunk_edges first, then chunks, then papers. A papers row is only
+    deleted if it has NO remaining chunks rows in ANY collection after
+    this collection's chunks are removed -- IngestPaperTool's
+    also_global double-write gives one papers.doi row TWO chunks rows
+    under different collection_id values (the global copy uses a
+    derived ":global" chunk id, see ingest_paper.py), so deleting one
+    collection's chunks must never take the shared papers row down with
+    it while the other collection's chunks still reference it.
+
+    Args:
+        pool: an asyncpg pool (or anything exposing .acquire()).
+        duckdb_store: the live DuckDBStore to delete matching embedding
+            rows from -- reused, never a second connection (DuckDBStore
+            supports exactly one read-write connection per file).
+        collection_id: the collection to permanently delete all data
+            for.
+
+    Returns:
+        Stats dict: chunk_edges_deleted, chunks_deleted, papers_deleted,
+        duckdb_rows_deleted.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            edge_rows = await conn.fetch(
+                "DELETE FROM chunk_edges WHERE collection_id = $1 "
+                "RETURNING src_chunk_id",
+                collection_id,
+            )
+
+            # Captured BEFORE the chunks DELETE below, so we know exactly
+            # which papers this collection's chunks referenced -- the set
+            # to re-check for orphanhood once those chunks are gone.
+            candidate_doi_rows = await conn.fetch(
+                "SELECT DISTINCT paper_doi FROM chunks "
+                "WHERE collection_id = $1 AND paper_doi IS NOT NULL",
+                collection_id,
+            )
+            candidate_dois = [r["paper_doi"] for r in candidate_doi_rows]
+
+            chunk_rows = await conn.fetch(
+                "DELETE FROM chunks WHERE collection_id = $1 RETURNING id",
+                collection_id,
+            )
+
+            paper_rows: list = []
+            if candidate_dois:
+                paper_rows = await conn.fetch(
+                    """
+                    DELETE FROM papers
+                    WHERE doi = ANY($1::text[])
+                      AND NOT EXISTS (
+                          SELECT 1 FROM chunks WHERE chunks.paper_doi = papers.doi
+                      )
+                    RETURNING doi
+                    """,
+                    candidate_dois,
+                )
+
+    # Dispatched via asyncio.to_thread -- same reasoning as insert_chunks'
+    # phase 2 above: this synchronous DuckDB call (holding DuckDBStore's
+    # internal lock) must not block the event loop this coroutine runs on.
+    duckdb_rows_deleted = await asyncio.to_thread(
+        duckdb_store.delete_by_collection_id, collection_id
+    )
+
+    stats = {
+        "chunk_edges_deleted": len(edge_rows),
+        "chunks_deleted": len(chunk_rows),
+        "papers_deleted": len(paper_rows),
+        "duckdb_rows_deleted": duckdb_rows_deleted,
+    }
+    logger.info(f"Collection '{collection_id}' data wipe complete: {stats}")
+    return stats
