@@ -16,7 +16,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..agents import AgentOrchestrator
 from ..embedding import VLLMEmbedder
-from ..graph import insert_chunks, DuckDBStore
+from ..graph import delete_collection_data, insert_chunks, DuckDBStore
 from ..ingestion import (
     batch_convert_pdfs,
     get_webhook_handler,
@@ -24,12 +24,15 @@ from ..ingestion import (
 from ..ingestion.doi_resolver import build_doi_lookup, resolve_doi
 from ..retrieval import HybridRetriever, RAGEngine
 from ..utils import (
+    RESERVED_COLLECTION_SLUGS,
     get_logger,
     get_pg_pool,
     get_settings,
     insert_collection,
     validate_collection_slug,
 )
+from ..utils import delete_collection as delete_collection_row
+from ..utils import rename_collection as rename_collection_row
 from .request_context import build_request_context
 
 logger = get_logger(__name__)
@@ -769,6 +772,140 @@ async def list_collections():
             "FROM collections ORDER BY created_at"
         )
     return [CollectionResponse(**dict(row)) for row in rows]
+
+
+class DeleteCollectionResponse(BaseModel):
+    """Response for DELETE /api/v1/collections/{slug}."""
+
+    id: str
+    registry_row_deleted: bool
+    data_deleted: bool
+    stats: Optional[dict] = None
+
+
+@app.delete("/api/v1/collections/{slug}", response_model=DeleteCollectionResponse)
+async def delete_collection(
+    slug: str,
+    http_request: Request,
+    delete_data: bool = False,
+):
+    """
+    Remove a collection.
+
+    Default mode (delete_data=false, any authenticated caller): deletes
+    ONLY the collections registry row -- papers/chunks/chunk_edges/
+    DuckDB rows tagged with this collection_id are left completely
+    untouched and stay fully searchable under that id; they are just no
+    longer listed via /v1/models or GET /api/v1/collections. Recreating
+    the same slug afterward (POST /api/v1/collections) makes that old
+    data reachable again through the model picker -- a deliberate,
+    non-destructive property of collection_id being free-form text with
+    no FK to this registry table, NOT a bug to be "fixed" later.
+
+    delete_data=true (query param), admin-only: ALSO permanently deletes
+    every papers/chunks/chunk_edges row tagged with this collection_id
+    and every matching DuckDB embedding row -- see
+    src.graph.postgres_builder.delete_collection_data() for the full
+    FK-safe delete order and the also_global shared-paper handling. A
+    non-admin caller passing delete_data=true gets a 403, never a
+    silent downgrade to the safe mode.
+
+    "global" can never be deleted (400) -- it is implicit and has no
+    registry row of its own.
+
+    Registry-row semantics: a slug with no collections row is a 404 in
+    the default (safe) mode -- there is nothing there to remove. With
+    delete_data=true, a missing registry row does NOT block the data
+    wipe: the collections table is purely a discoverability aid (see
+    sql/schema.sql), not an existence check for papers/chunks/
+    chunk_edges/DuckDB rows, which accept any collection_id string
+    whether or not a matching registry row exists. Refusing to clean up
+    orphaned data under an unregistered collection_id just because no
+    registry row exists would leave 404 as the only signal, with no way
+    to actually delete that real, orphaned data.
+
+    No verify_api_key dependency, deliberately -- same self-serve
+    rationale as create_collection/list_collections above.
+    """
+    if slug in RESERVED_COLLECTION_SLUGS:
+        raise HTTPException(
+            status_code=400,
+            detail="'global' is reserved and implicit -- it has no collections row to delete.",
+        )
+
+    request_context = build_request_context(
+        http_request.headers, {}, settings.api.admin_email_set
+    )
+
+    if delete_data and not request_context.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only admin can delete the underlying "
+                "papers/chunks/chunk_edges/DuckDB data."
+            ),
+        )
+
+    deleted_row = await delete_collection_row(_pool, slug)
+
+    if deleted_row is None and not delete_data:
+        raise HTTPException(status_code=404, detail=f"Collection '{slug}' not found.")
+
+    stats = None
+    if delete_data:
+        stats = await delete_collection_data(_pool, _duckdb_store, slug)
+
+    return DeleteCollectionResponse(
+        id=slug,
+        registry_row_deleted=deleted_row is not None,
+        data_deleted=delete_data,
+        stats=stats,
+    )
+
+
+class RenameCollectionRequest(BaseModel):
+    """Request body for PATCH /api/v1/collections/{slug}."""
+
+    display_name: str = Field(
+        ...,
+        description=(
+            "New human-readable name. The slug/id itself can never be "
+            "changed through this endpoint -- renaming it would require "
+            "migrating collection_id across every papers/chunks/"
+            "chunk_edges row in Postgres AND every row in DuckDB, which "
+            "is out of scope."
+        ),
+    )
+
+
+@app.patch("/api/v1/collections/{slug}", response_model=CollectionResponse)
+async def rename_collection(
+    slug: str,
+    payload: RenameCollectionRequest,
+):
+    """
+    Rename a collection's display_name. The slug/id itself never
+    changes -- see RenameCollectionRequest's docstring.
+
+    Any authenticated caller may rename any collection -- collections
+    are shareable/collaborative by design, same policy as
+    list_collections above. No verify_api_key dependency, for the same
+    reason as create_collection/list_collections.
+
+    "global" can never be renamed (400) -- it is implicit and has no
+    registry row of its own. 404 if slug has no registry row.
+    """
+    if slug in RESERVED_COLLECTION_SLUGS:
+        raise HTTPException(
+            status_code=400,
+            detail="'global' is reserved and implicit -- it has no collections row to rename.",
+        )
+
+    row = await rename_collection_row(_pool, slug, payload.display_name)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Collection '{slug}' not found.")
+
+    return CollectionResponse(**dict(row))
 
 
 # OpenAI-compatible endpoints for Open WebUI integration

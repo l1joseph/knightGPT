@@ -633,3 +633,158 @@ def test_create_collection_inserts_via_existing_pool(tmp_path):
     assert insert_args[1] == "test-a"
     assert insert_args[2] == "Test A"
     assert insert_args[3] == "alice@example.com"
+
+
+@pytest.mark.unit
+def test_delete_collection_registry_row_via_existing_pool(tmp_path):
+    """delete_collection_registry_row() must reuse this retriever's own
+    self._pool -- never open a second asyncpg pool -- and return the
+    deleted row as a dict, same convention as create_collection()."""
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+    conn.fetchrow.return_value = {
+        "id": "test-a",
+        "display_name": "Test A",
+        "owner_email": "alice@example.com",
+        "created_at": None,
+    }
+
+    mock_create_pool = AsyncMock(return_value=pool)
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=mock_create_pool,
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        row = retriever.delete_collection_registry_row("test-a")
+        retriever.close()
+    store.close()
+
+    assert mock_create_pool.call_count == 1
+    assert row["id"] == "test-a"
+
+    delete_args = conn.fetchrow.call_args.args
+    assert "DELETE FROM collections" in delete_args[0]
+    assert delete_args[1] == "test-a"
+
+
+@pytest.mark.unit
+def test_delete_collection_registry_row_returns_none_when_missing(tmp_path):
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+    conn.fetchrow.return_value = None
+
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        row = retriever.delete_collection_registry_row("no-such-slug")
+        retriever.close()
+    store.close()
+
+    assert row is None
+
+
+@pytest.mark.unit
+def test_rename_collection_via_existing_pool(tmp_path):
+    """rename_collection() must reuse this retriever's own self._pool and
+    return the updated row as a dict."""
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+    conn.fetchrow.return_value = {
+        "id": "test-a",
+        "display_name": "New Name",
+        "owner_email": "alice@example.com",
+        "created_at": None,
+    }
+
+    mock_create_pool = AsyncMock(return_value=pool)
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=mock_create_pool,
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        row = retriever.rename_collection("test-a", "New Name")
+        retriever.close()
+    store.close()
+
+    assert mock_create_pool.call_count == 1
+    assert row["display_name"] == "New Name"
+
+    update_args = conn.fetchrow.call_args.args
+    assert "UPDATE collections" in update_args[0]
+    assert update_args[1] == "test-a"
+    assert update_args[2] == "New Name"
+
+
+@pytest.mark.unit
+def test_rename_collection_returns_none_when_missing(tmp_path):
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+    conn.fetchrow.return_value = None
+
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=AsyncMock(return_value=pool),
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        row = retriever.rename_collection("no-such-slug", "New Name")
+        retriever.close()
+    store.close()
+
+    assert row is None
+
+
+@pytest.mark.unit
+def test_delete_collection_data_via_existing_pool_and_duckdb_store(tmp_path):
+    """delete_collection_data() must reuse this retriever's own
+    self._pool/self._run and self.duckdb_store -- never a second
+    connection -- and return the stats dict from
+    src.graph.postgres_builder.delete_collection_data()."""
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    store.insert_embeddings([("c1", [0.1, 0.2, 0.3, 0.4])], collection_id="know-123")
+    store.ensure_index()
+
+    pool, conn = make_mock_pool_for_insert()
+    conn.fetch.side_effect = [[], [], []]
+    embedder = MagicMock()
+
+    mock_create_pool = AsyncMock(return_value=pool)
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=mock_create_pool,
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        stats = retriever.delete_collection_data("know-123")
+        retriever.close()
+    store.close()
+
+    assert mock_create_pool.call_count == 1
+    assert stats["duckdb_rows_deleted"] == 1
+    assert stats["chunk_edges_deleted"] == 0
+    assert stats["chunks_deleted"] == 0
+    assert stats["papers_deleted"] == 0

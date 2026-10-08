@@ -26,6 +26,8 @@ from ..tools.kegg import KEGGTool
 from ..tools.qiime2 import QIIME2Tool
 from ..tools.ingest_paper import IngestPaperTool
 from ..tools.create_collection import CreateCollectionTool
+from ..tools.delete_collection import DeleteCollectionTool
+from ..tools.rename_collection import RenameCollectionTool
 from ..tools.search_corpus import SearchCorpusTool
 from ..tools.websearch import WebSearchTool
 from ..tools.webfetch import WebFetchTool
@@ -56,7 +58,11 @@ Rules:
 - Be precise about methods and findings
 - Distinguish between established knowledge and recent findings
 - If the user asks to create a new project, collection, or workspace,
-  use the create_collection tool"""
+  use the create_collection tool
+- If the user asks to delete, remove, or wipe a project, collection, or
+  workspace, use the delete_collection tool
+- If the user asks to rename a project, collection, or workspace, use
+  the rename_collection tool"""
 
 
 @dataclass
@@ -92,6 +98,8 @@ class AgentOrchestrator:
             "qiime2_docs": QIIME2Tool(),
             "ingest_paper": IngestPaperTool(retriever=retriever),
             "create_collection": CreateCollectionTool(retriever=retriever),
+            "delete_collection": DeleteCollectionTool(retriever=retriever),
+            "rename_collection": RenameCollectionTool(retriever=retriever),
             "search_corpus": SearchCorpusTool(retriever=retriever),
             "web_search": WebSearchTool(),
             "web_fetch": WebFetchTool(),

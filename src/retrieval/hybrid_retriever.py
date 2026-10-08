@@ -25,8 +25,14 @@ from ..chunking import Chunk
 from ..embedding import VLLMEmbedder
 from ..graph.duckdb_store import DuckDBStore
 from ..graph.postgres_builder import insert_chunks
+from ..graph.postgres_builder import (
+    delete_collection_data as _delete_collection_data_async,
+)
 from ..utils import get_logger, get_settings
-from ..utils.db import insert_collection, sync_graph_on_connect
+from ..utils.db import insert_collection
+from ..utils.db import delete_collection as _delete_collection_row_async
+from ..utils.db import rename_collection as _rename_collection_async
+from ..utils.db import sync_graph_on_connect
 from .base import BaseRetriever, RetrievalResult
 
 logger = get_logger(__name__)
@@ -228,6 +234,76 @@ class HybridRetriever(BaseRetriever):
             insert_collection(self._pool, collection_id, display_name, owner_email)
         )
         return dict(row)
+
+    def delete_collection_registry_row(self, collection_id: str) -> Optional[dict]:
+        """Delete one row from the collections registry, if present, via
+        this retriever's own pool. This is the default, non-destructive
+        delete mode -- see src.utils.db.delete_collection()'s docstring
+        for why it never touches papers/chunks/chunk_edges/DuckDB.
+        Synchronous; safe to call from any thread, including one already
+        inside a running event loop -- e.g. from
+        DeleteCollectionTool.execute().
+
+        Args:
+            collection_id: the collection's slug/id to remove from the
+                registry.
+
+        Returns:
+            dict with id, display_name, owner_email, created_at, or None
+            if no row existed for collection_id.
+        """
+        row = self._run(_delete_collection_row_async(self._pool, collection_id))
+        return dict(row) if row is not None else None
+
+    def rename_collection(
+        self, collection_id: str, display_name: str
+    ) -> Optional[dict]:
+        """Update only display_name for one collections registry row, via
+        this retriever's own pool. Never touches id/slug -- see
+        src.utils.db.rename_collection()'s docstring. Synchronous; safe
+        to call from any thread, including one already inside a running
+        event loop -- e.g. from RenameCollectionTool.execute().
+
+        Args:
+            collection_id: the slug to rename. Unchanged by this call.
+            display_name: the new human-readable name.
+
+        Returns:
+            dict with id, display_name, owner_email, created_at, or None
+            if no row existed for collection_id.
+        """
+        row = self._run(
+            _rename_collection_async(self._pool, collection_id, display_name)
+        )
+        return dict(row) if row is not None else None
+
+    def delete_collection_data(self, collection_id: str) -> dict:
+        """Admin-only destructive wipe: delete every papers/chunks/
+        chunk_edges row tagged with collection_id (Postgres) and every
+        matching chunk_embeddings row (DuckDB), via this retriever's
+        existing self._pool/self._run bridge and self.duckdb_store --
+        never a second connection, same rationale as insert_paper()/
+        create_collection() above. See
+        src.graph.postgres_builder.delete_collection_data() for the full
+        delete-order/orphan-paper logic this wraps. Synchronous; safe to
+        call from any thread, including one already inside a running
+        event loop -- e.g. from DeleteCollectionTool.execute().
+
+        Does not refuse "global" or check caller identity itself --
+        callers (DeleteCollectionTool, the DELETE route) are responsible
+        for both before reaching here.
+
+        Args:
+            collection_id: the collection to permanently delete all data
+                for.
+
+        Returns:
+            Stats dict: chunk_edges_deleted, chunks_deleted,
+            papers_deleted, duckdb_rows_deleted.
+        """
+        return self._run(
+            _delete_collection_data_async(self._pool, self.duckdb_store, collection_id)
+        )
 
     def close(self) -> None:
         """Close the pool and stop the private event loop. Call once, at

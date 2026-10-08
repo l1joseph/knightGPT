@@ -113,3 +113,78 @@ async def insert_collection(
             display_name,
             owner_email,
         )
+
+
+async def delete_collection(
+    pool: asyncpg.Pool,
+    collection_id: str,
+) -> asyncpg.Record | None:
+    """Delete one row from the collections registry table, if present.
+
+    This is the default, non-destructive delete mode -- see DELETE
+    /api/v1/collections/{slug} (src/api/main.py) and
+    DeleteCollectionTool (src/tools/delete_collection.py). It does NOT
+    touch papers/chunks/chunk_edges/DuckDB: those rows keep existing
+    under collection_id, just no longer listed via /v1/models or GET
+    /api/v1/collections. Recreating the same slug afterward (via
+    insert_collection) makes that old data reachable again through the
+    model picker -- a deliberate, non-destructive property of
+    collection_id being free-form text with no FK to this table, not a
+    bug.
+
+    Shared by the HTTP route (direct _pool access) and
+    HybridRetriever.delete_collection_registry_row() (used by the
+    agent tool), same convention as insert_collection() above.
+
+    Args:
+        pool: an asyncpg pool (or anything exposing .acquire()).
+        collection_id: the slug to remove.
+
+    Returns:
+        The deleted row (id, display_name, owner_email, created_at), or
+        None if no row existed for collection_id.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            DELETE FROM collections WHERE id = $1
+            RETURNING id, display_name, owner_email, created_at
+            """,
+            collection_id,
+        )
+
+
+async def rename_collection(
+    pool: asyncpg.Pool,
+    collection_id: str,
+    display_name: str,
+) -> asyncpg.Record | None:
+    """Update only display_name for one collections registry row.
+
+    Never touches id/slug -- renaming the slug would require migrating
+    collection_id across every papers/chunks/chunk_edges row in
+    Postgres AND every row in DuckDB, out of scope (see PATCH
+    /api/v1/collections/{slug}'s docstring in src/api/main.py).
+
+    Shared by the HTTP route (direct _pool access) and
+    HybridRetriever.rename_collection() (used by the agent tool), same
+    convention as insert_collection()/delete_collection() above.
+
+    Args:
+        pool: an asyncpg pool (or anything exposing .acquire()).
+        collection_id: the slug to rename. Unchanged by this call.
+        display_name: the new human-readable name.
+
+    Returns:
+        The updated row (id, display_name, owner_email, created_at), or
+        None if no row existed for collection_id.
+    """
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            UPDATE collections SET display_name = $2 WHERE id = $1
+            RETURNING id, display_name, owner_email, created_at
+            """,
+            collection_id,
+            display_name,
+        )
