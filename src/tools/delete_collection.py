@@ -154,17 +154,49 @@ class DeleteCollectionTool(BaseTool):
                 metadata={"slug": slug_str},
             )
 
+        # Data wipe runs BEFORE the registry row delete, deliberately: the
+        # registry row is the user-visible signal that a collection
+        # "exists" (it's what /v1/models and GET /api/v1/collections show).
+        # If the dangerous papers/chunks/chunk_edges/DuckDB delete fails
+        # partway, leaving the registry row intact means the collection
+        # still shows up normally and nothing is silently orphaned --
+        # worst case it's an empty-looking collection, never a vanished
+        # one with real data quietly left behind under an id nobody can
+        # see anymore. Reversing this order was a deliberate fix after an
+        # earlier version ran the registry delete first.
+        stats = None
+        if delete_data:
+            try:
+                stats = self.retriever.delete_collection_data(slug_str)
+            except Exception as e:
+                logger.error(f"delete_collection: data wipe failed for {slug_str}: {e}")
+                return ToolResult(
+                    tool_name=self.name,
+                    success=False,
+                    error=(
+                        f"Deleting the underlying data for '{slug_str}' "
+                        f"failed: {e}. Nothing was removed -- its registry "
+                        "entry (if any) is still intact."
+                    ),
+                    metadata={"slug": slug_str},
+                )
+
         try:
             deleted_row = self.retriever.delete_collection_registry_row(slug_str)
         except Exception as e:
             logger.error(
                 f"delete_collection: registry delete failed for {slug_str}: {e}"
             )
+            extra = (
+                " Its underlying data has already been permanently deleted."
+                if delete_data
+                else ""
+            )
             return ToolResult(
                 tool_name=self.name,
                 success=False,
-                error=f"Could not delete collection '{slug_str}': {e}",
-                metadata={"slug": slug_str},
+                error=f"Could not delete collection '{slug_str}': {e}.{extra}",
+                metadata={"slug": slug_str, "data_deleted": delete_data},
             )
 
         if deleted_row is None and not delete_data:
@@ -174,30 +206,6 @@ class DeleteCollectionTool(BaseTool):
                 error=f"Collection '{slug_str}' is not registered -- nothing to delete.",
                 metadata={"slug": slug_str, "registry_row_deleted": False},
             )
-
-        stats = None
-        if delete_data:
-            try:
-                stats = self.retriever.delete_collection_data(slug_str)
-            except Exception as e:
-                logger.error(
-                    f"delete_collection: data wipe failed for {slug_str} "
-                    f"(registry row delete already succeeded): {e}"
-                )
-                return ToolResult(
-                    tool_name=self.name,
-                    success=False,
-                    error=(
-                        f"Removed collection '{slug_str}' from the registry, "
-                        f"but deleting its underlying data failed: {e}. The "
-                        "registry row deletion already happened and was NOT "
-                        "rolled back."
-                    ),
-                    metadata={
-                        "slug": slug_str,
-                        "registry_row_deleted": deleted_row is not None,
-                    },
-                )
 
         registry_note = (
             f"Removed '{slug_str}' from the collection registry"

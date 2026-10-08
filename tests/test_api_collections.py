@@ -294,6 +294,32 @@ def test_delete_collection_with_delete_data_and_no_registry_row_still_wipes_data
     )
 
 
+@pytest.mark.unit
+def test_delete_collection_data_wipe_failure_leaves_registry_row_untouched(
+    admin_email,
+):
+    """The data wipe must run BEFORE the registry row delete: if the
+    dangerous papers/chunks/chunk_edges/DuckDB delete raises, the
+    registry row delete must never be attempted, so the collection still
+    shows up normally rather than silently vanishing while its data
+    lingers un-discoverable."""
+    pool, conn = make_mock_pool()
+    main_module._pool = pool
+    main_module._duckdb_store = MagicMock()
+
+    request = FakeRequest(headers={"X-OpenWebUI-User-Email": admin_email})
+    with patch(
+        "src.api.main.delete_collection_data",
+        new=AsyncMock(side_effect=RuntimeError("db locked")),
+    ):
+        with pytest.raises(RuntimeError, match="db locked"):
+            asyncio.run(
+                main_module.delete_collection("test-a", request, delete_data=True)
+            )
+
+    conn.fetchrow.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # PATCH /api/v1/collections/{slug}
 # ---------------------------------------------------------------------------

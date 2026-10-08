@@ -846,14 +846,21 @@ async def delete_collection(
             ),
         )
 
+    # Data wipe runs BEFORE the registry row delete, deliberately: the
+    # registry row is the user-visible signal a collection "exists" (it's
+    # what /v1/models and GET /api/v1/collections show). If the dangerous
+    # papers/chunks/chunk_edges/DuckDB delete fails partway, leaving the
+    # registry row intact means the collection still shows up normally
+    # and nothing real is silently orphaned -- worst case it looks empty,
+    # never vanished-with-data-left-behind.
+    stats = None
+    if delete_data:
+        stats = await delete_collection_data(_pool, _duckdb_store, slug)
+
     deleted_row = await delete_collection_row(_pool, slug)
 
     if deleted_row is None and not delete_data:
         raise HTTPException(status_code=404, detail=f"Collection '{slug}' not found.")
-
-    stats = None
-    if delete_data:
-        stats = await delete_collection_data(_pool, _duckdb_store, slug)
 
     return DeleteCollectionResponse(
         id=slug,

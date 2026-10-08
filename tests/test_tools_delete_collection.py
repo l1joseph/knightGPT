@@ -181,14 +181,15 @@ def test_execute_registry_delete_failure_returns_failure_not_exception():
 
 
 @pytest.mark.unit
-def test_execute_data_wipe_failure_after_registry_delete_reports_partial_success():
-    """If the registry row delete already succeeded but the data wipe
-    then fails, that must be surfaced clearly -- not silently dropped
-    and not reported as a clean success."""
+def test_execute_data_wipe_failure_leaves_registry_row_untouched():
+    """The data wipe must run BEFORE the registry row delete: if the
+    dangerous papers/chunks/chunk_edges/DuckDB delete fails, the registry
+    row must never have been touched, so the collection still shows up
+    normally rather than silently vanishing while its data lingers
+    un-discoverable."""
     from src.tools.delete_collection import DeleteCollectionTool
 
     mock_retriever = MagicMock()
-    mock_retriever.delete_collection_registry_row.return_value = {"id": "test-a"}
     mock_retriever.delete_collection_data.side_effect = RuntimeError("db locked")
     tool = DeleteCollectionTool(retriever=mock_retriever)
 
@@ -197,7 +198,34 @@ def test_execute_data_wipe_failure_after_registry_delete_reports_partial_success
 
     assert result.success is False
     assert "db locked" in result.error
-    assert result.metadata["registry_row_deleted"] is True
+    mock_retriever.delete_collection_registry_row.assert_not_called()
+
+
+@pytest.mark.unit
+def test_execute_registry_delete_failure_after_successful_wipe_reports_data_deleted():
+    """If the data wipe succeeds but the (much less risky) registry row
+    delete then fails, that must say the data is already gone -- never
+    silently imply the collection still has its data."""
+    from src.tools.delete_collection import DeleteCollectionTool
+
+    mock_retriever = MagicMock()
+    mock_retriever.delete_collection_data.return_value = {
+        "chunks_deleted": 3,
+        "chunk_edges_deleted": 1,
+        "papers_deleted": 1,
+        "duckdb_rows_deleted": 3,
+    }
+    mock_retriever.delete_collection_registry_row.side_effect = RuntimeError(
+        "connection reset"
+    )
+    tool = DeleteCollectionTool(retriever=mock_retriever)
+
+    ctx = RequestContext(email="admin@example.com", is_admin=True, collection_id=None)
+    result = tool.execute("", slug="test-a", delete_data=True, request_context=ctx)
+
+    assert result.success is False
+    assert "connection reset" in result.error
+    assert "already been permanently deleted" in result.error
 
 
 @pytest.mark.unit
