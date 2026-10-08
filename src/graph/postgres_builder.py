@@ -21,15 +21,20 @@ async def build_edges_for_chunk(
     embedding: list[float],
     similarity_threshold: float = 0.7,
     max_neighbors: int = 10,
+    collection_id: str = "global",
 ) -> int:
-    """Search DuckDB for chunk_id's nearest neighbors and write
-    chunk_edges rows above similarity_threshold. Shared by insert_chunks()
-    (phase 3, right after a chunk's own Postgres row + embedding are
-    committed) and scripts/backfill_chunk_edges.py (re-running this same
-    step later for a chunk that already exists in Postgres+DuckDB but has
-    no edges -- e.g. because this step previously failed for it, back
-    when a single bad chunk's search failure could abort the rest of a
-    whole insert_chunks() batch instead of being isolated per-chunk).
+    """Search DuckDB for chunk_id's nearest neighbors WITHIN THE SAME
+    collection_id and write chunk_edges rows above similarity_threshold --
+    edges never cross collections (see the spec's Decisions section): the
+    candidate search itself is scoped, so a byte-identical embedding
+    sitting in a different collection can never become an edge candidate
+    here. Shared by insert_chunks() (phase 3, right after a chunk's own
+    Postgres row + embedding are committed) and
+    scripts/backfill_chunk_edges.py (re-running this same step later for a
+    chunk that already exists in Postgres+DuckDB but has no edges -- e.g.
+    because this step previously failed for it, back when a single bad
+    chunk's search failure could abort the rest of a whole insert_chunks()
+    batch instead of being isolated per-chunk).
 
     Does not catch its own exceptions -- callers that need one chunk's
     failure to not abort a larger batch wrap this in their own
@@ -38,13 +43,16 @@ async def build_edges_for_chunk(
     Returns the number of edges inserted.
     """
     neighbors = await asyncio.to_thread(
-        duckdb_store.search, embedding, top_k=max_neighbors + 1
+        duckdb_store.search,
+        embedding,
+        top_k=max_neighbors + 1,
+        collection_id=collection_id,
     )
 
     # The neighbor search can return the chunk itself (distance 0 /
     # similarity 1.0); exclude it before capping.
     edges = [
-        (chunk_id, neighbor_id, similarity)
+        (chunk_id, neighbor_id, similarity, collection_id)
         for neighbor_id, similarity in neighbors
         if neighbor_id != chunk_id and similarity >= similarity_threshold
     ][:max_neighbors]
@@ -53,8 +61,8 @@ async def build_edges_for_chunk(
         async with conn.transaction():
             await conn.executemany(
                 """
-                INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity)
-                VALUES ($1, $2, $3)
+                INSERT INTO chunk_edges (src_chunk_id, dst_chunk_id, similarity, collection_id)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (src_chunk_id, dst_chunk_id) DO NOTHING
                 """,
                 edges,
@@ -69,6 +77,7 @@ async def insert_chunks(
     duckdb_store: DuckDBStore,
     similarity_threshold: float = 0.7,
     max_neighbors: int = 10,
+    collection_id: str = "global",
 ) -> dict:
     """
     Insert chunks into Postgres (text/metadata) and DuckDB (embeddings),
@@ -107,6 +116,12 @@ async def insert_chunks(
         duckdb_store: open DuckDBStore for embeddings and neighbor search
         similarity_threshold: minimum cosine similarity for an edge
         max_neighbors: maximum edges per new chunk
+        collection_id: the collection every inserted paper/chunk/edge row
+            is tagged with -- defaults to "global" so existing callers
+            that don't pass it keep today's single-corpus behavior
+            unchanged. Edges never cross collections: the phase-3
+            neighbor search is itself scoped to this same collection_id
+            (see build_edges_for_chunk's docstring).
 
     Returns:
         Stats dict with chunks_inserted, edges_inserted, papers_inserted
@@ -152,21 +167,22 @@ async def insert_chunks(
                 if paper and paper["doi"] not in inserted_papers:
                     await conn.execute(
                         """
-                        INSERT INTO papers (doi, title, metadata)
-                        VALUES ($1, $2, $3::jsonb)
+                        INSERT INTO papers (doi, title, metadata, collection_id)
+                        VALUES ($1, $2, $3::jsonb, $4)
                         ON CONFLICT (doi) DO NOTHING
                         """,
                         paper["doi"],
                         paper.get("title"),
                         json.dumps(paper.get("metadata", {})),
+                        collection_id,
                     )
                     inserted_papers.add(paper["doi"])
                     stats["papers_inserted"] += 1
 
                 await conn.execute(
                     """
-                    INSERT INTO chunks (id, paper_doi, text, section, token_count)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO chunks (id, paper_doi, text, section, token_count, collection_id)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (id) DO NOTHING
                     """,
                     chunk.id,
@@ -174,6 +190,7 @@ async def insert_chunks(
                     chunk.text,
                     chunk.section,
                     chunk.token_count,
+                    collection_id,
                 )
                 stats["chunks_inserted"] += 1
             inserted_chunks.append(chunk)
@@ -189,6 +206,7 @@ async def insert_chunks(
         await asyncio.to_thread(
             duckdb_store.insert_embeddings,
             [(c.id, c.embedding) for c in inserted_chunks],
+            collection_id,
         )
         await asyncio.to_thread(duckdb_store.ensure_index)
 
@@ -212,6 +230,7 @@ async def insert_chunks(
                     chunk.embedding,
                     similarity_threshold,
                     max_neighbors,
+                    collection_id,
                 )
             except Exception:
                 logger.exception(

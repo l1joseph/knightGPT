@@ -211,14 +211,17 @@ async def test_build_edges_for_chunk_returns_edge_count(tmp_path):
 
     assert count == 1
     edge_calls = [
-        call for call in conn.executemany.call_args_list if "chunk_edges" in call.args[0]
+        call
+        for call in conn.executemany.call_args_list
+        if "chunk_edges" in call.args[0]
     ]
     assert len(edge_calls) == 1
     inserted_edges = edge_calls[0].args[1]
     assert len(inserted_edges) == 1
-    src, dst, similarity = inserted_edges[0]
+    src, dst, similarity, collection_id = inserted_edges[0]
     assert (src, dst) == ("new1", "existing1")
     assert similarity == pytest.approx(0.9998, abs=1e-3)
+    assert collection_id == "global"
 
 
 @pytest.mark.unit
@@ -227,7 +230,9 @@ async def test_build_edges_for_chunk_no_qualifying_neighbors_inserts_nothing(tmp
     from src.graph.postgres_builder import build_edges_for_chunk
 
     store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
-    store.insert_embeddings([("new1", [1.0, 0.0, 0.0, 0.0]), ("far", [0.0, 0.0, 0.0, 1.0])])
+    store.insert_embeddings(
+        [("new1", [1.0, 0.0, 0.0, 0.0]), ("far", [0.0, 0.0, 0.0, 1.0])]
+    )
     store.ensure_index()
 
     _, conn = make_mock_pool()
@@ -267,11 +272,11 @@ async def test_insert_chunks_isolates_phase3_failure_to_one_chunk(tmp_path):
     original_search = store.search
     call_count = {"n": 0}
 
-    def flaky_search(embedding, top_k):
+    def flaky_search(embedding, top_k, collection_id="global"):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise Exception("simulated array_cosine_distance NULL failure")
-        return original_search(embedding, top_k)
+        return original_search(embedding, top_k, collection_id=collection_id)
 
     store.search = flaky_search
 
@@ -295,3 +300,104 @@ async def test_insert_chunks_isolates_phase3_failure_to_one_chunk(tmp_path):
         call for call in conn.execute.call_args_list if "graph.build" in call.args[0]
     ]
     assert len(build_calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_insert_chunks_writes_collection_id_to_papers_and_chunks(tmp_path):
+    from src.graph.postgres_builder import insert_chunks
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    chunk = Chunk(
+        id="new1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0]
+    )
+    papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
+
+    pool, conn = make_mock_pool()
+
+    await insert_chunks(
+        pool, [chunk], papers, store, similarity_threshold=0.7, collection_id="know-123"
+    )
+    store.close()
+
+    chunks_insert = next(
+        c for c in conn.execute.call_args_list if "INSERT INTO chunks" in c.args[0]
+    )
+    assert "collection_id" in chunks_insert.args[0]
+    assert chunks_insert.args[-1] == "know-123"
+
+    papers_insert = next(
+        c for c in conn.execute.call_args_list if "INSERT INTO papers" in c.args[0]
+    )
+    assert "collection_id" in papers_insert.args[0]
+    assert papers_insert.args[-1] == "know-123"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_insert_chunks_defaults_collection_id_to_global(tmp_path):
+    """Existing callers (scripts/ingest_pipeline.py, migrate_to_postgres.py,
+    etc.) that don't pass collection_id must keep writing 'global'."""
+    from src.graph.postgres_builder import insert_chunks
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    chunk = Chunk(
+        id="new1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0]
+    )
+    papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
+
+    pool, conn = make_mock_pool()
+
+    await insert_chunks(pool, [chunk], papers, store, similarity_threshold=0.7)
+    store.close()
+
+    chunks_insert = next(
+        c for c in conn.execute.call_args_list if "INSERT INTO chunks" in c.args[0]
+    )
+    assert chunks_insert.args[-1] == "global"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_insert_chunks_edge_candidate_search_scoped_to_same_collection(tmp_path):
+    """Edges never cross collections: a chunk being ingested into
+    collection A must only ever find edge candidates among chunks already
+    in A, never from 'global' or another collection, even if a
+    byte-identical embedding exists there."""
+    from src.graph.postgres_builder import insert_chunks
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    # An identical-embedding chunk sitting in a DIFFERENT collection --
+    # must never become an edge candidate for the new chunk below.
+    store.insert_embeddings(
+        [("other_collection_chunk", [1.0, 0.0, 0.0, 0.0])], collection_id="global"
+    )
+    store.insert_embeddings(
+        [("same_collection_chunk", [0.99, 0.01, 0.0, 0.0])], collection_id="know-123"
+    )
+    store.ensure_index()
+
+    chunk = Chunk(
+        id="new1", text="hello", source_file="p.md", embedding=[1.0, 0.0, 0.0, 0.0]
+    )
+    papers = {"p.md": {"doi": "p.md", "title": "T", "metadata": {}}}
+
+    pool, conn = make_mock_pool()
+
+    stats = await insert_chunks(
+        pool,
+        [chunk],
+        papers,
+        store,
+        similarity_threshold=0.7,
+        collection_id="know-123",
+    )
+    store.close()
+
+    edge_calls = [
+        c for c in conn.executemany.call_args_list if "chunk_edges" in c.args[0]
+    ]
+    assert len(edge_calls) == 1
+    inserted_ids = [e[1] for e in edge_calls[0].args[1]]
+    assert inserted_ids == ["same_collection_chunk"]
+    assert stats["edges_inserted"] == 1

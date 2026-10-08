@@ -393,9 +393,18 @@ something else has since claimed it), bound to `127.0.0.1` only since
 Caddy runs as a native host process on kl-remote, not a container:
 
 ```bash
-docker compose -f docker/docker-compose.yaml -f docker/docker-compose.kl-remote.yaml \
+docker compose --env-file ./.env -f docker/docker-compose.yaml -f docker/docker-compose.kl-remote.yaml \
     up -d --build api postgres
 ```
+
+`--env-file ./.env` is required, not optional, when invoking compose from the
+repo root with `-f docker/docker-compose.yaml`: Docker Compose resolves the
+default `.env` lookup relative to the *first* `-f` file's directory
+(`docker/`), not the current working directory -- confirmed live on
+kl-remote with Docker Compose v5.1.3, where a bare `up -d --build` failed
+with `required variable ... is missing a value` for both
+`POSTGRES_BACKUP_DUMP_PATH` and `VLLM_API_KEY` even though both were
+correctly set in `~/knightGPT/.env` the whole time.
 
 Then, two manual steps outside this repo's own tooling:
 

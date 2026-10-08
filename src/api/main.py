@@ -3,13 +3,15 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import asyncpg
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from ..agents import AgentOrchestrator
@@ -21,7 +23,14 @@ from ..ingestion import (
 )
 from ..ingestion.doi_resolver import build_doi_lookup, resolve_doi
 from ..retrieval import HybridRetriever, RAGEngine
-from ..utils import get_logger, get_pg_pool, get_settings
+from ..utils import (
+    get_logger,
+    get_pg_pool,
+    get_settings,
+    insert_collection,
+    validate_collection_slug,
+)
+from .request_context import build_request_context
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -98,7 +107,7 @@ class ChatRequest(BaseModel):
 
     message: str = Field(..., description="User message")
     top_k: int = Field(default=5, description="Number of chunks to retrieve")
-    max_tokens: int = Field(default=1024, description="Maximum response tokens")
+    max_tokens: int = Field(default=8000, description="Maximum response tokens")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     stream: bool = Field(default=False, description="Stream response")
 
@@ -612,10 +621,24 @@ class AgentChatRequest(BaseModel):
 
     message: str = Field(..., description="User message")
     top_k: int = Field(default=5, description="RAG retrieval depth")
+    files: Optional[list[dict]] = Field(
+        default=None,
+        description=(
+            "OpenAI/Open-WebUI-style attached-files array; a "
+            '{"type": "collection", "id": ...} entry selects which '
+            "Knowledge collection this request is scoped to -- same "
+            "convention as /v1/chat/completions. Optional, for parity "
+            "with that endpoint."
+        ),
+    )
 
 
 @app.post("/api/v1/agent/chat")
-async def agent_chat(request: AgentChatRequest, _: None = Depends(verify_api_key)):
+async def agent_chat(
+    request: AgentChatRequest,
+    http_request: Request,
+    _: None = Depends(verify_api_key),
+):
     """
     Multi-agent RAG chat with tool use.
 
@@ -624,13 +647,19 @@ async def agent_chat(request: AgentChatRequest, _: None = Depends(verify_api_key
     a final answer or the tool-round safety cap is hit.
     """
     orchestrator = get_orchestrator()
+    request_context = build_request_context(
+        http_request.headers, request.model_dump(), settings.api.admin_email_set
+    )
 
     # orchestrator.run() makes blocking OpenAI client calls and can loop up
     # to max_tool_rounds sequential round-trips -- offloaded to a worker
     # thread so it doesn't stall the event loop for every other concurrent
     # request, matching how /v1/chat/completions already handles this.
     result = await run_in_threadpool(
-        orchestrator.run, request.message, top_k=request.top_k
+        orchestrator.run,
+        request.message,
+        top_k=request.top_k,
+        request_context=request_context,
     )
 
     return {
@@ -654,21 +683,137 @@ async def google_form_webhook(
     return await webhook.handle_submission(request, background_tasks)
 
 
+class CreateCollectionRequest(BaseModel):
+    """Request body for POST /api/v1/collections."""
+
+    slug: str = Field(
+        ...,
+        description=(
+            "Collection id, e.g. 'test-a'. Becomes the collection_id "
+            "requests are scoped to once selected via the model picker "
+            "(model id f'knightgpt-rag-{slug}')."
+        ),
+    )
+    display_name: Optional[str] = Field(
+        default=None,
+        description="Human-readable name shown alongside the collection.",
+    )
+
+    @field_validator("slug")
+    @classmethod
+    def _validate_slug(cls, value: str) -> str:
+        validate_collection_slug(value)
+        return value
+
+
+class CollectionResponse(BaseModel):
+    """A row from the collections registry table."""
+
+    id: str
+    display_name: Optional[str]
+    owner_email: Optional[str]
+    created_at: datetime
+
+
+@app.post("/api/v1/collections", response_model=CollectionResponse, status_code=201)
+async def create_collection(
+    payload: CreateCollectionRequest,
+    http_request: Request,
+):
+    """
+    Register a new collection in the discoverability registry.
+
+    This is NOT an enforcement mechanism -- papers/chunks/chunk_edges
+    accept any collection_id string with or without a matching row here.
+    It only makes the collection discoverable via /v1/models (one
+    knightgpt-rag-<slug> model entry per row) and GET
+    /api/v1/collections.
+
+    No verify_api_key dependency, deliberately: this is meant to be a
+    self-serve action any user can take from Open WebUI, which has no
+    way to supply the internal shared-secret bearer token used to gate
+    the RAG-facing routes (chat/agent chat/search/completions). Matches
+    the existing /api/v1/ingest* routes, which are also ungated for the
+    same reason.
+    """
+    request_context = build_request_context(
+        http_request.headers, payload.model_dump(), settings.api.admin_email_set
+    )
+
+    try:
+        row = await insert_collection(
+            _pool, payload.slug, payload.display_name, request_context.email
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Collection '{payload.slug}' already exists.",
+        )
+
+    return CollectionResponse(**dict(row))
+
+
+@app.get("/api/v1/collections", response_model=list[CollectionResponse])
+async def list_collections():
+    """
+    List all registered collections, oldest first.
+
+    Any authenticated caller may list -- collections are shareable/
+    collaborative by design from day one, not restricted to their owner
+    or to admins. No verify_api_key dependency, for the same reason as
+    create_collection above.
+    """
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, display_name, owner_email, created_at "
+            "FROM collections ORDER BY created_at"
+        )
+    return [CollectionResponse(**dict(row)) for row in rows]
+
+
 # OpenAI-compatible endpoints for Open WebUI integration
 @app.get("/v1/models")
 async def list_models():
-    """List available models (OpenAI-compatible)."""
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "knightgpt-rag",
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": "knight-lab",
-            }
-        ],
-    }
+    """List available models (OpenAI-compatible).
+
+    One entry per registered collection -- id
+    f"knightgpt-rag-{collection.id}" -- in addition to the bare
+    "knightgpt-rag" entry (collection_id None/'global'), which keeps
+    working exactly as before. Selecting a per-collection entry in Open
+    WebUI's model picker is how collection_id now reaches this API (see
+    src/api/request_context.py's _collection_id_from_model()) -- the
+    Knowledge collection-attachment UI never forwarded it. Falls back to
+    just the bare entry if the collections query fails, so a Postgres
+    outage never takes down model listing entirely.
+    """
+    models = [
+        {
+            "id": "knightgpt-rag",
+            "object": "model",
+            "created": 1700000000,
+            "owned_by": "knight-lab",
+        }
+    ]
+
+    if _pool is not None:
+        try:
+            async with _pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id FROM collections ORDER BY created_at"
+                )
+            models.extend(
+                {
+                    "id": f"knightgpt-rag-{row['id']}",
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": "knight-lab",
+                }
+                for row in rows
+            )
+        except Exception as e:
+            logger.error(f"Failed to list collections for /v1/models: {e}")
+
+    return {"object": "list", "data": models}
 
 
 def _split_latest_user_message(
@@ -723,7 +868,15 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
     messages = data.get("messages", [])
     stream = data.get("stream", False)
     temperature = data.get("temperature", 0.3)
-    max_tokens = data.get("max_tokens", 2000)
+    # Live-verified on kl-remote: detailed, citation-heavy answers were
+    # getting cut off mid-section at the old 2000-token default -- most
+    # OpenAI-compatible clients (including Open WebUI) only send
+    # max_tokens if the user explicitly set one in their own UI, so this
+    # default is what actually governs response length almost always.
+    max_tokens = data.get("max_tokens", 8000)
+    request_context = build_request_context(
+        request.headers, data, settings.api.admin_email_set
+    )
 
     user_message, history = _split_latest_user_message(messages)
 
@@ -752,6 +905,7 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
                         temperature=temperature,
                         max_tokens=max_tokens,
                         history=history,
+                        request_context=request_context,
                     )
                 finally:
                     event_queue.put(SENTINEL)
@@ -780,6 +934,7 @@ async def openai_chat_completions(request: Request, _: None = Depends(verify_api
         temperature=temperature,
         max_tokens=max_tokens,
         history=history,
+        request_context=request_context,
     )
 
     return {

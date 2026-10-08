@@ -275,8 +275,11 @@ def test_simultaneous_tool_calls_get_distinct_indices():
 def test_non_dict_tool_arguments_default_to_empty_dict():
     """Valid-but-non-object JSON arguments (e.g. a bare "null") must not
     crash args.get()/.items() downstream -- they should just behave like
-    no arguments were given."""
+    no arguments were given (aside from the orchestrator's own injected
+    request_context, which is always present -- see the request_context
+    tests below)."""
     from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
     from src.tools.base import BaseTool, ToolResult
 
     captured_kwargs = {}
@@ -303,7 +306,10 @@ def test_non_dict_tool_arguments_default_to_empty_dict():
     events = []
     ctx = orchestrator.run("test query", on_event=events.append)
 
-    assert captured_kwargs == {"query": "", "extra": {}}
+    assert captured_kwargs == {
+        "query": "",
+        "extra": {"request_context": RequestContext()},
+    }
     assert ctx.final_answer == "final answer"
 
 
@@ -329,6 +335,109 @@ def test_llm_call_failure_emits_error_and_done_instead_of_raising():
     assert [e["type"] for e in events] == ["error", "done"]
     assert "connection timed out" in events[0]["message"]
     assert "connection timed out" in ctx.final_answer
+
+
+@pytest.mark.unit
+def test_empty_content_after_tool_failure_triggers_forced_synthesis():
+    """Regression test for a live production incident: a user asking to
+    "explain long read sequencing for metagenomics" saw only the model's
+    planning preamble ("I'll gather current literature...") and then
+    nothing -- the SSE stream completed normally (a real [DONE], no
+    error chunk), it just never carried a real answer.
+
+    Root cause: web_fetch 404'd on a URL from web_search's results (see
+    src/tools/webfetch.py -- it catches the failure and returns a
+    ToolResult(success=False, ...), it does not raise). The orchestrator
+    fed that failure back to the model as a tool-role message exactly as
+    designed. But the model's *next* turn came back with neither
+    tool_calls nor any real content -- and the old code treated "no
+    tool_calls" as unconditionally meaning "the model is done, use
+    `content` (here, '') as the final answer," so ctx.final_answer
+    silently became "". Nothing downstream ever surfaced that as an
+    error; the stream just ended.
+
+    The fix: a no-tool-calls turn with blank/whitespace-only content must
+    trigger one forced synthesis-only follow-up call instead of being
+    accepted as the final answer.
+    """
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.tools.base import BaseTool, ToolResult
+
+    class FailingWebFetchTool(BaseTool):
+        name = "web_fetch"
+        description = "fake"
+
+        def execute(self, query: str, **kwargs) -> ToolResult:
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error="404 Client Error: Not Found for url: "
+                "https://www.nature.com/articles/s12967-024-04917-1",
+            )
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"web_fetch": FailingWebFetchTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response(
+            "web_fetch", {"url": "https://www.nature.com/articles/s12967-024-04917-1"}
+        ),
+        _fake_final_answer_response(""),  # degenerate empty turn after the failure
+        _fake_final_answer_response(
+            "Long-read sequencing uses platforms such as PacBio and Oxford "
+            "Nanopore... [the fetch I attempted failed, so this draws on "
+            "general knowledge rather than that specific source]."
+        ),
+    ]
+
+    events = []
+    ctx = orchestrator.run("explain long read sequencing", on_event=events.append)
+
+    assert ctx.final_answer  # never empty/falsy
+    assert "Long-read sequencing" in ctx.final_answer
+    assert events[-1]["type"] == "done"
+    assert orchestrator.client.chat.completions.create.call_count == 3
+    # The forced synthesis call must not offer tools= (the model cannot
+    # request yet another round).
+    forced_call_kwargs = orchestrator.client.chat.completions.create.call_args_list[
+        -1
+    ].kwargs
+    assert "tools" not in forced_call_kwargs or forced_call_kwargs["tools"] is None
+
+
+@pytest.mark.unit
+def test_empty_content_persisting_through_forced_synthesis_falls_back_to_message():
+    """If even the forced synthesis-only call comes back empty, the
+    orchestrator must still never return "" as the final answer -- it
+    should fall back to a clear, visible message rather than silently
+    truncating the response."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.tools.base import BaseTool, ToolResult
+
+    class FailingTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, **kwargs) -> ToolResult:
+            return ToolResult(tool_name=self.name, success=False, error="boom")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FailingTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response("fake_tool", {"query": "x"}),
+        _fake_final_answer_response(""),
+        _fake_final_answer_response(""),
+    ]
+
+    ctx = orchestrator.run("test query")
+
+    assert ctx.final_answer
+    assert ctx.final_answer.strip() != ""
 
 
 @pytest.mark.unit
@@ -388,6 +497,131 @@ def test_history_is_included_between_system_prompt_and_current_query():
 
 
 @pytest.mark.unit
+def test_request_context_is_injected_into_every_tool_call():
+    """The orchestrator's own RequestContext (not anything from the
+    model's JSON args) must reach tool.execute() as the request_context
+    keyword on every call."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
+    from src.tools.base import BaseTool, ToolResult
+
+    captured = {}
+
+    class FakeTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, *, request_context=None, **kwargs) -> ToolResult:
+            captured["request_context"] = request_context
+            return ToolResult(tool_name=self.name, success=True, data="output")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FakeTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response("fake_tool", {"query": "x"}),
+        _fake_final_answer_response("final answer"),
+    ]
+
+    ctx = RequestContext(
+        email="alice@example.com", is_admin=True, collection_id="know-1"
+    )
+    orchestrator.run("test query", request_context=ctx)
+
+    assert captured["request_context"] is ctx
+
+
+@pytest.mark.unit
+def test_no_request_context_passed_defaults_to_non_admin_no_collection():
+    """Existing non-HTTP callers that don't pass request_context (e.g. any
+    script calling orchestrator.run() directly) must see an all-None /
+    non-admin context, preserving current behavior exactly -- not a
+    crash, not None itself reaching the tool."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
+    from src.tools.base import BaseTool, ToolResult
+
+    captured = {}
+
+    class FakeTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, *, request_context=None, **kwargs) -> ToolResult:
+            captured["request_context"] = request_context
+            return ToolResult(tool_name=self.name, success=True, data="output")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FakeTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response("fake_tool", {"query": "x"}),
+        _fake_final_answer_response("final answer"),
+    ]
+
+    orchestrator.run("test query")
+
+    assert captured["request_context"] == RequestContext()
+
+
+@pytest.mark.unit
+def test_model_hallucinated_request_context_arg_never_overrides_real_one():
+    """If the model's JSON tool-call arguments happen to include a key
+    named request_context (or collection_id), the orchestrator's own
+    RequestContext must still be what reaches tool.execute() --
+    model-supplied arguments must never be read for this purpose, and
+    must never even cause a 'got multiple values for keyword argument'
+    crash."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.api.request_context import RequestContext
+    from src.tools.base import BaseTool, ToolResult
+
+    captured = {}
+
+    class FakeTool(BaseTool):
+        name = "fake_tool"
+        description = "fake"
+
+        def execute(self, query: str, *, request_context=None, **kwargs) -> ToolResult:
+            captured["request_context"] = request_context
+            captured["kwargs"] = kwargs
+            return ToolResult(tool_name=self.name, success=True, data="output")
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = None
+    orchestrator.tools = {"fake_tool": FakeTool()}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_tool_call_response(
+            "fake_tool",
+            {
+                "query": "x",
+                "request_context": "evil",
+                "collection_id": "evil-collection",
+            },
+        ),
+        _fake_final_answer_response("final answer"),
+    ]
+
+    real_ctx = RequestContext(
+        email="alice@example.com", is_admin=True, collection_id="know-1"
+    )
+    orchestrator.run("test query", request_context=real_ctx)
+
+    assert captured["request_context"] is real_ctx
+    # The hallucinated collection_id landed harmlessly in **kwargs (no
+    # tool reads it for tenancy -- see Tasks 8/9) -- confirming it was
+    # passed through, not silently dropped or crashed on.
+    assert captured["kwargs"]["collection_id"] == "evil-collection"
+    assert "request_context" not in captured["kwargs"]
+
+
+@pytest.mark.unit
 def test_no_history_matches_prior_single_turn_behavior():
     """Omitting history (the default) must produce the exact same messages
     list as before this feature existed -- single-turn callers (e.g.
@@ -410,3 +644,70 @@ def test_no_history_matches_prior_single_turn_behavior():
         {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
         {"role": "user", "content": "simple query"},
     ]
+
+
+@pytest.mark.unit
+def test_retrieve_rag_context_calls_format_context_with_chunks_only():
+    """Regression test: _retrieve_rag_context() used to call
+    retriever.format_context(chunks, similarity_scores), but
+    format_context()'s real signature is (chunks, max_tokens=4000) --
+    passing a list of scores into the max_tokens slot made every call
+    raise "'>' not supported between instances of 'int' and 'list'"
+    inside format_context's own token-budget check. Live-verified on
+    kl-remote: this was silently swallowed by _retrieve_rag_context's
+    broad except-and-log-empty-string handler the whole time, so the
+    automatic RAG context injected at the start of every run() call was
+    *always* empty, with nothing surfacing the failure. Confirmed
+    pre-existing (git blame: 2026-09-14), unrelated to collection
+    scoping -- just never caught until a live chat hit it."""
+    from src.agents.orchestrator import AgentOrchestrator
+    from src.retrieval.base import RetrievalResult
+    from src.chunking import Chunk
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    chunks = [Chunk(id="c1", text="chunk text", source_file="10.1/a")]
+    mock_retriever = MagicMock()
+    mock_retriever.retrieve.return_value = RetrievalResult(
+        chunks=chunks, query_embedding=[], similarity_scores=[0.9]
+    )
+    mock_retriever.format_context.return_value = "formatted context"
+    orchestrator.retriever = mock_retriever
+
+    result = orchestrator._retrieve_rag_context("query", top_k=5)
+
+    mock_retriever.format_context.assert_called_once_with(chunks)
+    assert result == "formatted context"
+
+
+@pytest.mark.unit
+def test_rag_context_merges_into_single_system_message_not_two():
+    """Regression test: when rag_context is non-empty, it must be merged
+    into the ONE system message, not appended as a second separate
+    system-role message. Live-verified against NRP's qwen3 endpoint that
+    a second system message (even still ahead of any user/assistant
+    turns) is rejected outright with "System message must be at the
+    beginning." This went uncaught by every other orchestrator test
+    because they all set orchestrator.retriever = None, which makes
+    _retrieve_rag_context() return "" immediately -- never exercising
+    this code path at all."""
+    from src.agents.orchestrator import AgentOrchestrator, GENERATOR_SYSTEM_PROMPT
+
+    orchestrator = AgentOrchestrator.__new__(AgentOrchestrator)
+    orchestrator.retriever = MagicMock()
+    orchestrator._retrieve_rag_context = MagicMock(return_value="some graph context")
+    orchestrator.tools = {}
+    orchestrator.client = MagicMock()
+    orchestrator.model = "qwen3"
+    orchestrator.client.chat.completions.create.side_effect = [
+        _fake_final_answer_response("answer"),
+    ]
+
+    orchestrator.run("simple query")
+
+    call_kwargs = orchestrator.client.chat.completions.create.call_args_list[0].kwargs
+    sent_messages = call_kwargs["messages"]
+
+    system_messages = [m for m in sent_messages if m["role"] == "system"]
+    assert len(system_messages) == 1
+    assert GENERATOR_SYSTEM_PROMPT in system_messages[0]["content"]
+    assert "some graph context" in system_messages[0]["content"]

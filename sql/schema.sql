@@ -22,6 +22,33 @@ CREATE TABLE IF NOT EXISTS chunk_edges (
     PRIMARY KEY (src_chunk_id, dst_chunk_id)
 );
 
+-- Per-user/per-project collections migration -- see
+-- docs/superpowers/specs/2026-10-01-per-user-collections-design.md.
+-- NOT NULL with a constant default is a fast, metadata-only change on
+-- Postgres 17 (no table rewrite) and makes every existing row an
+-- explicit, queryable member of the 'global' collection rather than an
+-- implicit NULL -- NULL = anything is never true in SQL, which would
+-- make pgGraph's tenant_column scoping unable to ever match existing
+-- rows if collection_id were nullable instead.
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
+ALTER TABLE chunk_edges ADD COLUMN IF NOT EXISTS collection_id text NOT NULL DEFAULT 'global';
+
+-- Collections registry -- model-id-per-collection follow-up to the
+-- per-user/per-project collections migration above. Purely a
+-- discoverability aid for GET /api/v1/collections and /v1/models (which
+-- lists one knightgpt-rag-<id> model entry per row here, see
+-- src/api/main.py's list_models()) -- it is NOT used for enforcement.
+-- collection_id on papers/chunks/chunk_edges stays free-form text: any
+-- string works there whether or not a matching row exists here, and
+-- 'global' is implicit and never needs a row of its own.
+CREATE TABLE IF NOT EXISTS collections (
+    id           text PRIMARY KEY,
+    display_name text,
+    owner_email  text,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS qiita_studies (
     study_id                bigint PRIMARY KEY,
     sample_count            integer NOT NULL,
@@ -58,6 +85,24 @@ COMMENT ON COLUMN qiita_studies.study_id IS
     'See the "KNOWN SIMPLIFICATION" block in '
     'scripts/qiita_registry_ingest.py for full detail.';
 
+-- pgGraph's tenant-scoping mechanism is an indirection: graph.tenant_setting
+-- holds the NAME of another GUC to read the actual tenant value from (read
+-- by graph.enforce_tenant_scope at query time), it does not carry the
+-- tenant value itself. This is a one-time, database-level configuration --
+-- ALTER DATABASE ... SET takes effect for new sessions, so it must run
+-- before anything opens a connection expecting tenant scoping to work, and
+-- it does not need to be (and should not be) re-set per request. Confirmed
+-- live on kl-remote: an earlier version of this codebase set
+-- graph.tenant_setting ITSELF to the per-request collection_id value
+-- (mistaking it for the value-holding GUC), which made every
+-- graph.expand() call fail with "tenant scope is required for registered
+-- tables with tenant_column" -- pgGraph was correctly looking up
+-- current_setting(graph.tenant_setting's own value) and finding no real
+-- GUC by that name. The actual per-request value goes into
+-- knightgpt.collection_id (see HybridRetriever._retrieve_async), the GUC
+-- this line points graph.tenant_setting at.
+ALTER DATABASE knightgpt SET graph.tenant_setting = 'knightgpt.collection_id';
+
 -- pgGraph registration: chunks as nodes, chunk_edges as an edge-table relationship.
 -- Idempotency is not assumed from pgGraph itself; each registration is wrapped
 -- in its own DO block so re-running this file against an already-provisioned
@@ -79,7 +124,8 @@ BEGIN
   PERFORM graph.add_table(
       table_name := 'public.chunks'::regclass,
       id_column := 'id',
-      columns := ARRAY['text', 'section']
+      columns := ARRAY['text', 'section'],
+      tenant_column := 'collection_id'
   );
 EXCEPTION WHEN OTHERS THEN
   RAISE NOTICE 'graph.add_table(public.chunks) raised % (%) -- ignored, assumed already registered; verify with SELECT * FROM graph.registered_tables()', SQLERRM, SQLSTATE;

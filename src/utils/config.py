@@ -236,9 +236,41 @@ class APISettings(BaseSettings):
         default=None,
         description="API key for authentication",
     )
+    admin_emails: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of admin email addresses (matched against "
+            "RequestContext.email, case-insensitive). An admin may add a "
+            "paper to the global corpus via ingest_paper's also_global flag, "
+            "or default to global ingestion when no collection is attached. "
+            "Comma-separated raw string (not a JSON list) so it can be set "
+            "as a plain env var value, e.g. API_ADMIN_EMAILS=alice@x.com,bob@x.com."
+        ),
+    )
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        """Parsed, lowercased, whitespace-stripped admin_emails -- the form
+        RequestContext construction actually compares against."""
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
 
     model_config = SettingsConfigDict(
         env_prefix="API_",
+        env_file=".env",
+        extra="ignore",
+    )
+
+
+class SearXNGSettings(BaseSettings):
+    """SearXNG (self-hosted web search) configuration."""
+
+    url: str = Field(
+        default="http://searxng:8080",
+        description="SearXNG instance base URL (used by WebSearchTool)",
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="SEARXNG_",
         env_file=".env",
         extra="ignore",
     )
@@ -254,6 +286,7 @@ class Settings(BaseSettings):
     ingestion: IngestionSettings = Field(default_factory=IngestionSettings)
     rss: RSSSettings = Field(default_factory=RSSSettings)
     api: APISettings = Field(default_factory=APISettings)
+    searxng: SearXNGSettings = Field(default_factory=SearXNGSettings)
 
     # General settings
     log_level: str = Field(

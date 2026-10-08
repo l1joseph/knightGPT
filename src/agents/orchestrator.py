@@ -14,7 +14,7 @@ format, which stays in src/api/sse_adapter.py.
 import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from openai import OpenAI
 
@@ -25,8 +25,22 @@ from ..tools.openalex import OpenAlexTool
 from ..tools.kegg import KEGGTool
 from ..tools.qiime2 import QIIME2Tool
 from ..tools.ingest_paper import IngestPaperTool
+from ..tools.create_collection import CreateCollectionTool
 from ..tools.search_corpus import SearchCorpusTool
+from ..tools.websearch import WebSearchTool
+from ..tools.webfetch import WebFetchTool
 from ..utils import get_logger, get_settings
+
+if TYPE_CHECKING:
+    # Deferred to a TYPE_CHECKING-only import (same pattern as
+    # src/tools/base.py) because src.api's package __init__ imports
+    # src.api.main, which imports AgentOrchestrator from this very module
+    # -- a module-level `from ..api.request_context import RequestContext`
+    # here would make `import src.agents` raise ImportError: cannot import
+    # name 'AgentOrchestrator' from partially initialized module
+    # 'src.agents' (circular import). The real import happens lazily
+    # inside run(), by which point both packages are fully initialized.
+    from ..api.request_context import RequestContext
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -40,7 +54,9 @@ Rules:
 - Cite sources using [Source: filename] or [DOI: xxx] format
 - If the context doesn't contain enough information, say so
 - Be precise about methods and findings
-- Distinguish between established knowledge and recent findings"""
+- Distinguish between established knowledge and recent findings
+- If the user asks to create a new project, collection, or workspace,
+  use the create_collection tool"""
 
 
 @dataclass
@@ -75,7 +91,10 @@ class AgentOrchestrator:
             "kegg_lookup": KEGGTool(),
             "qiime2_docs": QIIME2Tool(),
             "ingest_paper": IngestPaperTool(retriever=retriever),
+            "create_collection": CreateCollectionTool(retriever=retriever),
             "search_corpus": SearchCorpusTool(retriever=retriever),
+            "web_search": WebSearchTool(),
+            "web_fetch": WebFetchTool(),
         }
 
         self.client = OpenAI(
@@ -91,8 +110,9 @@ class AgentOrchestrator:
         on_event: Callable[[dict[str, Any]], None] | None = None,
         max_tool_rounds: int = 5,
         temperature: float = 0.3,
-        max_tokens: int = 2000,
+        max_tokens: int = 8000,
         history: list[dict] | None = None,
+        request_context: "RequestContext | None" = None,
     ) -> AgentContext:
         """Run the function-calling agent loop.
 
@@ -119,23 +139,41 @@ class AgentOrchestrator:
                 Passed straight through to every LLM call this run makes.
                 Optional; omitted or empty means a single-turn conversation
                 (unchanged prior behavior).
+            request_context: identity + collection scope for this request
+                (see src/api/request_context.py), injected into every
+                tool.execute() call as a keyword-only argument the
+                model's JSON tool-call arguments can never populate or
+                override. Optional; omitted (the default) uses an
+                all-None/non-admin/no-collection context, preserving
+                existing behavior for any caller that doesn't pass one
+                (e.g. a script calling run() directly).
         """
+        # Imported lazily (not at module level) to avoid a circular import
+        # -- see the TYPE_CHECKING comment near the top of this file.
+        from ..api.request_context import RequestContext
+
         emit = on_event or (lambda event: None)
         ctx = AgentContext(original_query=query)
+        effective_request_context = request_context or RequestContext()
 
         rag_context = self._retrieve_rag_context(query, top_k)
         ctx.rag_context = rag_context
 
-        messages: list[dict] = [
-            {"role": "system", "content": GENERATOR_SYSTEM_PROMPT},
-        ]
+        # One single system message, not two -- live-verified against
+        # NRP's qwen3 endpoint that a second system message (even placed
+        # immediately after the first, both still ahead of any
+        # user/assistant turns) is rejected outright with "System message
+        # must be at the beginning." This went uncaught until now because
+        # _retrieve_rag_context() had its own bug (passing
+        # similarity_scores into format_context's max_tokens slot) that
+        # silently made rag_context always "" -- so the second system
+        # message never actually got added before that was fixed.
+        system_content = GENERATOR_SYSTEM_PROMPT
         if rag_context:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": f"Knowledge graph context:\n{rag_context}",
-                }
+            system_content = (
+                f"{GENERATOR_SYSTEM_PROMPT}\n\nKnowledge graph context:\n{rag_context}"
             )
+        messages: list[dict] = [{"role": "system", "content": system_content}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": query})
@@ -161,9 +199,34 @@ class AgentOrchestrator:
                 return ctx
 
             if not tool_calls:
-                # content was already streamed out token-by-token above --
-                # don't re-emit it as one more giant token event.
-                ctx.final_answer = content
+                if content and content.strip():
+                    # content was already streamed out token-by-token
+                    # above -- don't re-emit it as one more giant token
+                    # event.
+                    ctx.final_answer = content
+                    emit({"type": "done"})
+                    return ctx
+
+                # Degenerate case, confirmed live in production: after a
+                # tool call fails (e.g. web_fetch 404ing), the model's
+                # next turn can come back with neither tool_calls nor any
+                # real content. Treating that as "the model is done, ''
+                # is the final answer" is exactly the bug that silently
+                # truncated a user's visible response down to nothing but
+                # the planning preamble that preceded the failed tool
+                # call -- the SSE stream still completed normally (a
+                # "done" event, no error), so nothing ever surfaced the
+                # failure. Force one more synthesis-only call instead of
+                # accepting the empty content as final.
+                logger.warning(
+                    "Round %d returned no tool_calls and no real content "
+                    "(likely following a failed tool call); forcing a "
+                    "synthesis-only follow-up instead of truncating.",
+                    _round_num,
+                )
+                ctx.final_answer = self._force_final_answer(
+                    messages, emit, temperature, max_tokens
+                )
                 emit({"type": "done"})
                 return ctx
 
@@ -213,7 +276,12 @@ class AgentOrchestrator:
                 else:
                     result = tool.execute(
                         args.get("query", ""),
-                        **{k: v for k, v in args.items() if k != "query"},
+                        request_context=effective_request_context,
+                        **{
+                            k: v
+                            for k, v in args.items()
+                            if k not in ("query", "request_context")
+                        },
                     )
                 ctx.tool_results.append(result)
 
@@ -237,6 +305,35 @@ class AgentOrchestrator:
 
         # max_tool_rounds exhausted without a final answer -- force one,
         # with no tools offered so the model cannot request yet another round.
+        ctx.final_answer = self._force_final_answer(
+            messages, emit, temperature, max_tokens
+        )
+        emit({"type": "done"})
+        return ctx
+
+    def _force_final_answer(
+        self,
+        messages: list[dict],
+        emit: Callable[[dict[str, Any]], None],
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Make one more LLM call with no tools offered, forcing a
+        plain-text final answer, and guarantee the result is never empty.
+
+        Used both when max_tool_rounds is exhausted and when a round's
+        response comes back with neither tool_calls nor real content (see
+        the comment at that call site in run() for the production
+        incident this guards against). An LLM call failure here, or a
+        second empty completion, is reported as content rather than
+        silently returned as "" -- this is always the last thing run()
+        does before returning, so there is no later stage to catch an
+        empty final_answer.
+
+        Returns:
+            The LLM's answer text, or a fallback error/apology string --
+            never "".
+        """
         try:
             stream = self.client.chat.completions.create(
                 model=self.model,
@@ -254,16 +351,26 @@ class AgentOrchestrator:
             content, _tool_calls = self._consume_stream(stream, emit)
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
-            ctx.final_answer = f"The language model request failed: {e}"
             emit({"type": "error", "message": str(e)})
-            emit({"type": "done"})
-            return ctx
+            return f"The language model request failed: {e}"
 
         # No tools= was offered on this call, so content (already streamed
-        # out token-by-token above) is necessarily the final answer.
-        ctx.final_answer = content
-        emit({"type": "done"})
-        return ctx
+        # out token-by-token above) is necessarily the final answer --
+        # unless it's empty, in which case fall back rather than return "".
+        if content and content.strip():
+            return content
+
+        logger.error(
+            "Forced final-answer call returned empty content -- falling "
+            "back to a generic message instead of silently returning ''."
+        )
+        fallback = (
+            "I wasn't able to put together a complete answer for this "
+            "request -- some of the information I tried to gather may not "
+            "have been available. Please try rephrasing your question."
+        )
+        emit({"type": "token", "content": fallback})
+        return fallback
 
     def _consume_stream(
         self,
@@ -354,9 +461,7 @@ class AgentOrchestrator:
             retrieval = self.retriever.retrieve(
                 query=query, top_k=top_k, expand_context=True
             )
-            return self.retriever.format_context(
-                retrieval.chunks, retrieval.similarity_scores
-            )
+            return self.retriever.format_context(retrieval.chunks)
         except Exception as e:
             logger.error(f"RAG retrieval failed: {e}")
             return ""
