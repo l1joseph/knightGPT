@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +23,13 @@ from ..ingestion import (
 )
 from ..ingestion.doi_resolver import build_doi_lookup, resolve_doi
 from ..retrieval import HybridRetriever, RAGEngine
-from ..utils import get_logger, get_pg_pool, get_settings
+from ..utils import (
+    get_logger,
+    get_pg_pool,
+    get_settings,
+    insert_collection,
+    validate_collection_slug,
+)
 from .request_context import build_request_context
 
 logger = get_logger(__name__)
@@ -678,9 +683,6 @@ async def google_form_webhook(
     return await webhook.handle_submission(request, background_tasks)
 
 
-_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
-
-
 class CreateCollectionRequest(BaseModel):
     """Request body for POST /api/v1/collections."""
 
@@ -700,17 +702,7 @@ class CreateCollectionRequest(BaseModel):
     @field_validator("slug")
     @classmethod
     def _validate_slug(cls, value: str) -> str:
-        if value == "global":
-            raise ValueError(
-                "'global' is reserved and implicit -- it never needs a "
-                "collections row."
-            )
-        if not _SLUG_PATTERN.match(value):
-            raise ValueError(
-                "slug must match ^[a-z0-9][a-z0-9-]{0,39}$ (lowercase "
-                "alphanumerics and hyphens, starting with an "
-                "alphanumeric, max 40 chars)"
-            )
+        validate_collection_slug(value)
         return value
 
 
@@ -749,17 +741,9 @@ async def create_collection(
     )
 
     try:
-        async with _pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO collections (id, display_name, owner_email)
-                VALUES ($1, $2, $3)
-                RETURNING id, display_name, owner_email, created_at
-                """,
-                payload.slug,
-                payload.display_name,
-                request_context.email,
-            )
+        row = await insert_collection(
+            _pool, payload.slug, payload.display_name, request_context.email
+        )
     except asyncpg.UniqueViolationError:
         raise HTTPException(
             status_code=409,
