@@ -82,7 +82,7 @@ def test_create_collection_success(restore_pool):
     payload = CreateCollectionRequest(slug="test-a", display_name="Test A")
     request = FakeRequest(headers={"X-OpenWebUI-User-Email": "alice@example.com"})
 
-    result = asyncio.run(main_module.create_collection(payload, request, _=None))
+    result = asyncio.run(main_module.create_collection(payload, request))
 
     assert result.id == "test-a"
     assert result.display_name == "Test A"
@@ -107,7 +107,7 @@ def test_create_collection_duplicate_slug_returns_409(restore_pool):
     request = FakeRequest(headers={})
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(main_module.create_collection(payload, request, _=None))
+        asyncio.run(main_module.create_collection(payload, request))
     assert exc_info.value.status_code == 409
 
 
@@ -131,7 +131,7 @@ def test_list_collections_returns_inserted_rows(restore_pool):
     ]
     main_module._pool = pool
 
-    result = asyncio.run(main_module.list_collections(_=None))
+    result = asyncio.run(main_module.list_collections())
 
     assert [c.id for c in result] == ["test-a", "test-b"]
     assert result[1].display_name is None

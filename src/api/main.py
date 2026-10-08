@@ -727,7 +727,6 @@ class CollectionResponse(BaseModel):
 async def create_collection(
     payload: CreateCollectionRequest,
     http_request: Request,
-    _: None = Depends(verify_api_key),
 ):
     """
     Register a new collection in the discoverability registry.
@@ -737,6 +736,13 @@ async def create_collection(
     It only makes the collection discoverable via /v1/models (one
     knightgpt-rag-<slug> model entry per row) and GET
     /api/v1/collections.
+
+    No verify_api_key dependency, deliberately: this is meant to be a
+    self-serve action any user can take from Open WebUI, which has no
+    way to supply the internal shared-secret bearer token used to gate
+    the RAG-facing routes (chat/agent chat/search/completions). Matches
+    the existing /api/v1/ingest* routes, which are also ungated for the
+    same reason.
     """
     request_context = build_request_context(
         http_request.headers, payload.model_dump(), settings.api.admin_email_set
@@ -764,13 +770,14 @@ async def create_collection(
 
 
 @app.get("/api/v1/collections", response_model=list[CollectionResponse])
-async def list_collections(_: None = Depends(verify_api_key)):
+async def list_collections():
     """
     List all registered collections, oldest first.
 
     Any authenticated caller may list -- collections are shareable/
     collaborative by design from day one, not restricted to their owner
-    or to admins.
+    or to admins. No verify_api_key dependency, for the same reason as
+    create_collection above.
     """
     async with _pool.acquire() as conn:
         rows = await conn.fetch(
