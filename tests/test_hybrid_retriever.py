@@ -583,3 +583,53 @@ def test_insert_paper_passes_through_explicit_collection_id(tmp_path):
         c for c in conn.execute.call_args_list if "INSERT INTO chunks" in c.args[0]
     )
     assert insert_call.args[-1] == "know-123"
+
+
+@pytest.mark.unit
+def test_create_collection_inserts_via_existing_pool(tmp_path):
+    """create_collection() must reuse this retriever's own self._pool --
+    never open a second asyncpg pool -- and return the inserted row as a
+    dict, same convention as insert_paper() above."""
+    from datetime import datetime, timezone
+
+    from src.retrieval.hybrid_retriever import HybridRetriever
+
+    store = DuckDBStore(str(tmp_path / "t.duckdb"), dim=4)
+    pool, conn = make_mock_pool_for_insert()
+    embedder = MagicMock()
+    created_at = datetime.now(timezone.utc)
+    conn.fetchrow.return_value = {
+        "id": "test-a",
+        "display_name": "Test A",
+        "owner_email": "alice@example.com",
+        "created_at": created_at,
+    }
+
+    mock_create_pool = AsyncMock(return_value=pool)
+    with patch(
+        "src.retrieval.hybrid_retriever.asyncpg.create_pool",
+        new=mock_create_pool,
+    ):
+        retriever = HybridRetriever(
+            dsn="postgresql://test", duckdb_store=store, embedder=embedder
+        )
+        row = retriever.create_collection(
+            "test-a", "Test A", owner_email="alice@example.com"
+        )
+        retriever.close()
+    store.close()
+
+    # Exactly one pool for the whole retriever lifetime, including this
+    # write -- create_collection must not create its own.
+    assert mock_create_pool.call_count == 1
+    assert row == {
+        "id": "test-a",
+        "display_name": "Test A",
+        "owner_email": "alice@example.com",
+        "created_at": created_at,
+    }
+
+    insert_args = conn.fetchrow.call_args.args
+    assert insert_args[1] == "test-a"
+    assert insert_args[2] == "Test A"
+    assert insert_args[3] == "alice@example.com"
